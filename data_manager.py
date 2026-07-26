@@ -1,4 +1,5 @@
 import requests
+import logging
 
 class DataManager:
     def __init__(self):
@@ -14,11 +15,12 @@ class DataManager:
             "X-Algolia-Application-Id": self.algolia_app_id,
             "X-Algolia-API-Key": self.algolia_api_key
         }
-        payload = {"params": f"query={query}&hitsPerPage=10"}
+        payload = {"params": f"query={query}&hitsPerPage=15"}
         try:
             response = requests.post(url, headers=headers, json=payload, timeout=10)
             return response.json().get("hits", []) if response.status_code == 200 else []
-        except:
+        except Exception as e:
+            logging.error(f"Search Error: {e}")
             return []
 
     def get_anime_details(self, anime_id):
@@ -28,21 +30,21 @@ class DataManager:
             if response.status_code == 200:
                 fields = response.json().get("fields", {})
                 return {
-                    "name": fields.get("name", {}).get("stringValue", "N/A"),
-                    "story": fields.get("details", {}).get("stringValue", "لا يوجد وصف."),
+                    "name": fields.get("name", {}).get("stringValue", "غير متوفر"),
+                    "story": fields.get("details", {}).get("stringValue", "لا يوجد وصف حالياً."),
                     "rating": fields.get("rate", {}).get("stringValue", "N/A"),
                     "year": fields.get("year", {}).get("stringValue", "N/A"),
                     "genres": ", ".join([tag.get("stringValue") for tag in fields.get("tags", {}).get("arrayValue", {}).get("values", [])]),
                     "episodes_count": fields.get("episodes_count", {}).get("stringValue", "غير معروف"),
                     "studio": fields.get("studio", {}).get("stringValue", "غير معروف"),
                     "poster": fields.get("poster_uri", {}).get("stringValue", ""),
-                    "type": fields.get("type", {}).get("stringValue", "anime") # anime or movie
                 }
-        except:
-            pass
+        except Exception as e:
+            logging.error(f"Details Error: {e}")
         return None
 
     def get_episodes(self, anime_id):
+        # محاولة جلب الحلقات من المسار الصحيح
         url = f"{self.firestore_base_url}/anime_list/{anime_id}/episodes"
         try:
             response = requests.get(url, timeout=10)
@@ -54,43 +56,44 @@ class DataManager:
                     name = fields.get("name", {}).get("stringValue", "Unknown")
                     ep_id = doc.get("name").split("/")[-1]
                     try:
+                        # استخراج الرقم من الاسم (مثال: "الحلقة 1" -> 1)
                         order = int(''.join(filter(str.isdigit, name)))
                     except:
                         order = 999
                     episodes.append({"id": ep_id, "name": name, "order": order})
                 episodes.sort(key=lambda x: x['order'])
                 return episodes
-        except:
-            pass
+        except Exception as e:
+            logging.error(f"Episodes Error: {e}")
         return []
 
     def get_servers(self, anime_id, episode_id):
+        # المسار في التطبيق هو anime_list/{id}/episodes/{id}/servers
         url = f"{self.firestore_base_url}/anime_list/{anime_id}/episodes/{episode_id}/servers"
         try:
-            response = requests.get(url, timeout=10)
+            response = requests.get(url, timeout=15)
             if response.status_code == 200:
                 docs = response.json().get("documents", [])
-                servers = []
+                all_links = []
                 for doc in docs:
                     fields = doc.get("fields", {})
-                    name = fields.get("name", {}).get("stringValue", "Unknown")
-                    links = {}
-                    if "streamtape_video_id" in fields:
-                        links["Streamtape"] = f"https://streamtape.com/e/{fields['streamtape_video_id']['stringValue']}"
-                    if "vidtube_video_id" in fields:
-                        links["Vidtube"] = f"https://vidtube.one/e/{fields['vidtube_video_id']['stringValue']}"
-                    if "link" in fields:
-                        links["سيرفر مباشر"] = fields['link']['stringValue']
+                    server_name = fields.get("name", {}).get("stringValue", "سيرفر غير معروف")
                     
-                    # جلب الجودات إذا توفرت
-                    qualities = []
-                    if "1080p" in name: qualities.append("1080p")
-                    elif "720p" in name: qualities.append("720p")
-                    elif "480p" in name: qualities.append("480p")
-                    else: qualities.append("جودة تلقائية")
-
-                    servers.append({"name": name, "links": links, "qualities": qualities})
-                return servers
-        except:
-            pass
+                    # فحص جميع الحقول الممكنة للروابط
+                    if "streamtape_video_id" in fields:
+                        val = fields["streamtape_video_id"]["stringValue"]
+                        all_links.append({"name": f"🎬 Streamtape ({server_name})", "url": f"https://streamtape.com/e/{val}"})
+                    
+                    if "vidtube_video_id" in fields:
+                        val = fields["vidtube_video_id"]["stringValue"]
+                        all_links.append({"name": f"🎥 Vidtube ({server_name})", "url": f"https://vidtube.one/e/{val}"})
+                    
+                    if "link" in fields:
+                        val = fields["link"]["stringValue"]
+                        if val.startswith("http"):
+                            all_links.append({"name": f"🚀 سيرفر مباشر ({server_name})", "url": val})
+                
+                return all_links
+        except Exception as e:
+            logging.error(f"Servers Error: {e}")
         return []
