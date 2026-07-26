@@ -37,15 +37,12 @@ class DataManager:
             return []
 
     def search_anime(self, query):
-        # بحث متوازي سريع جداً في 3 فهارس مختلفة
         indices = ["anime", "series", "movies"]
         all_hits = []
         with ThreadPoolExecutor(max_workers=3) as executor:
             futures = [executor.submit(self.search_algolia, idx, query) for idx in indices]
             for future in futures:
                 all_hits.extend(future.result())
-        
-        # إزالة التكرار
         seen = set()
         unique_hits = []
         for hit in all_hits:
@@ -53,11 +50,9 @@ class DataManager:
             if oid not in seen:
                 unique_hits.append(hit)
                 seen.add(oid)
-        
         return unique_hits[:15]
 
     def get_anime_details(self, anime_id):
-        # جلب التفاصيل بسرعة من خلال محاولة المسارين في وقت واحد
         def fetch(coll):
             url = f"{self.firestore_base_url}/{coll}/{anime_id}"
             try:
@@ -78,7 +73,6 @@ class DataManager:
             except:
                 return None
             return None
-
         with ThreadPoolExecutor(max_workers=2) as executor:
             results = list(executor.map(fetch, ["anime_list", "anime_list_movies"]))
             for r in results:
@@ -114,19 +108,28 @@ class DataManager:
             res = requests.get(url, headers=headers, timeout=5)
             if res.status_code == 200:
                 docs = res.json().get("documents", [])
-                links = []
+                pd_links = []
+                other_links = []
                 for doc in docs:
                     f = doc.get("fields", {})
                     s_name = f.get("name", {}).get("stringValue", "سيرفر")
+                    
+                    # محاولة استخراج رابط PD (عادة ما يكون في حقل link أو حقل خاص)
+                    link = f.get("link", {}).get("stringValue", "")
+                    
+                    if "pd" in s_name.lower() or "premium" in s_name.lower():
+                        if link.startswith("http"):
+                            pd_links.append({"name": f"💎 سيرفر PD ({s_name})", "url": link})
+                    
                     if "streamtape_video_id" in f:
-                        links.append({"name": f"🎬 Streamtape ({s_name})", "url": f"https://streamtape.com/e/{f['streamtape_video_id']['stringValue']}"})
+                        other_links.append({"name": f"🎬 Streamtape ({s_name})", "url": f"https://streamtape.com/e/{f['streamtape_video_id']['stringValue']}"})
                     if "vidtube_video_id" in f:
-                        links.append({"name": f"🎥 Vidtube ({s_name})", "url": f"https://vidtube.one/e/{f['vidtube_video_id']['stringValue']}"})
-                    if "link" in f:
-                        v = f["link"]["stringValue"]
-                        if v.startswith("http"):
-                            links.append({"name": f"🚀 مباشر ({s_name})", "url": v})
-                return links
+                        other_links.append({"name": f"🎥 Vidtube ({s_name})", "url": f"https://vidtube.one/e/{f['vidtube_video_id']['stringValue']}"})
+                    if link.startswith("http") and not any(l['url'] == link for l in pd_links):
+                        other_links.append({"name": f"🚀 مباشر ({s_name})", "url": link})
+                
+                # إرجاع PD أولاً ثم البقية
+                return pd_links + other_links
         except:
             pass
         return []
