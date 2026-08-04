@@ -41,7 +41,6 @@ class DataManager:
             return []
 
     def search_anime(self, query):
-        # Using 'all_anime' and 'series' as primary indices
         indices = ["all_anime", "series"]
         all_hits = []
         with ThreadPoolExecutor(max_workers=2) as executor:
@@ -54,11 +53,9 @@ class DataManager:
         for hit in all_hits:
             oid = hit.get("objectID")
             if oid not in seen:
-                # Normalize hit data
                 name = hit.get("name")
                 doc_ref = hit.get("doc_ref") or hit.get("path")
                 if not doc_ref:
-                    # Fallback if no doc_ref is provided
                     doc_ref = f"anime_list/{oid}"
                 
                 unique_hits.append({
@@ -71,7 +68,6 @@ class DataManager:
         return unique_hits[:15]
 
     def get_anime_details(self, doc_ref):
-        # doc_ref is something like "anime_list/Naruto"
         url = f"{self.firestore_base_url}/{doc_ref}"
         try:
             res = requests.get(url, params={"key": self.firebase_api_key}, timeout=3)
@@ -105,7 +101,6 @@ class DataManager:
                     name = f.get("name", {}).get("stringValue", "Unknown")
                     eid = doc.get("name").split("/")[-1]
                     try:
-                        # Extract episode number from name (e.g., "الحلقة 1" -> 1)
                         order = int("".join(filter(str.isdigit, name)))
                     except:
                         order = 999
@@ -116,6 +111,40 @@ class DataManager:
             pass
         return []
 
+    def resolve_m3u8(self, url):
+        """
+        Try to resolve a streamable M3u8 link from an iframe/redirector link.
+        """
+        if not url or not url.startswith("http"):
+            return url
+            
+        # 1. PixelDrain Direct
+        if "pixeldrain.com" in url:
+            pd_id_match = re.search(r"(?:/u/|/api/file/)([a-zA-Z0-9]+)", url)
+            if pd_id_match:
+                return f"https://pixeldrain.com/api/file/{pd_id_match.group(1)}?download"
+        
+        # 2. MixDrop Direct (Simple guess if possible)
+        if "mixdrop" in url:
+            # Mixdrop usually requires scraping, but sometimes we can find the ID
+            match = re.search(r"/e/([a-zA-Z0-9]+)", url)
+            if match:
+                return f"https://mixdrop.co/e/{match.group(1)}"
+        
+        # 3. StreamTape
+        if "streamtape.com" in url:
+            match = re.search(r"/(?:e|v)/([a-zA-Z0-9]+)", url)
+            if match:
+                return f"https://streamtape.com/e/{match.group(1)}"
+        
+        # 4. StreamWish
+        if "streamwish" in url or "strwish" in url:
+            match = re.search(r"/e/([a-zA-Z0-9]+)", url)
+            if match:
+                return f"https://streamwish.to/e/{match.group(1)}"
+
+        return url
+
     def get_servers(self, doc_ref, episode_id):
         url = f"{self.firestore_base_url}/{doc_ref}/episodes/{episode_id}/servers"
         headers = {"Authorization": f"Bearer {self.id_token}"} if self.id_token else {}
@@ -123,39 +152,43 @@ class DataManager:
             res = requests.get(url, headers=headers, params={"key": self.firebase_api_key}, timeout=5)
             if res.status_code == 200:
                 docs = res.json().get("documents", [])
-                pd_links = []
-                other_links = []
+                all_servers = []
+                
                 for doc in docs:
                     f = doc.get("fields", {})
                     s_name = f.get("name", {}).get("stringValue", "سيرفر")
                     link = f.get("link", {}).get("stringValue", "")
                     
-                    if "pd" in s_name.lower() or "premium" in s_name.lower() or "direct" in s_name.lower():
-                        if link.startswith("http"):
-                            # Transform PixelDrain links to direct download format
-                            if "pixeldrain.com" in link:
-                                # Match /u/ID or /api/file/ID
-                                pd_id_match = re.search(r"(?:/u/|/api/file/)([a-zA-Z0-9]+)", link)
-                                if pd_id_match:
-                                    pd_id = pd_id_match.group(1)
-                                    link = f"https://pixeldrain.com/api/file/{pd_id}?download"
-                            pd_links.append({"name": f"💎 سيرفر PD ({s_name})", "url": link})
+                    # Check for hidden fields in Anime Witcher's Firestore structure
+                    if not link:
+                        for key in ["streamtape_video_id", "vidtube_video_id", "mixdrop_video_id", "doodstream_video_id"]:
+                            if key in f:
+                                val = f[key].get("stringValue", "")
+                                if "streamtape" in key: link = f"https://streamtape.com/e/{val}"
+                                elif "vidtube" in key: link = f"https://vidtube.one/e/{val}"
+                                elif "mixdrop" in key: link = f"https://mixdrop.co/e/{val}"
+                                elif "doodstream" in key: link = f"https://dood.to/e/{val}"
+                                break
                     
-                    if "streamtape_video_id" in f:
-                        other_links.append({"name": f"🎬 Streamtape ({s_name})", "url": f"https://streamtape.com/e/{f['streamtape_video_id']['stringValue']}"})
-                    if "vidtube_video_id" in f:
-                        other_links.append({"name": f"🎥 Vidtube ({s_name})", "url": f"https://vidtube.one/e/{f['vidtube_video_id']['stringValue']}"})
-                    
-                    if link.startswith("http") and not any(l["url"] == link for l in pd_links):
-                        other_links.append({"name": f"🚀 {s_name}", "url": link})
+                    if link:
+                        resolved_link = self.resolve_m3u8(link)
+                        is_pd = "pd" in s_name.lower() or "premium" in s_name.lower() or "pixeldrain" in resolved_link
+                        
+                        server_info = {
+                            "name": f"💎 PD ({s_name})" if is_pd else f"🚀 {s_name}",
+                            "url": resolved_link,
+                            "priority": 1 if is_pd else 2
+                        }
+                        all_servers.append(server_info)
                 
-                return pd_links + other_links
-        except:
-            pass
+                # Sort: PD first
+                all_servers.sort(key=lambda x: x["priority"])
+                return all_servers
+        except Exception as e:
+            logging.error(f"Error fetching servers: {e}")
         return []
 
     def parse_smart_query(self, query):
-        # Try to match "Anime Name Episode X" or "Anime Name الحلقة X"
         patterns = [
             r"(.+)\s+(?:episode|ep|الحلقة|حلقة)\s+(\d+)",
             r"(.+)\s+(\d+)$"

@@ -1,8 +1,8 @@
 import logging
 import re
 import asyncio
-import uvicorn
 import os
+import uvicorn
 from contextlib import asynccontextmanager
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup, ReplyKeyboardMarkup
 from telegram.ext import Application, CommandHandler, MessageHandler, filters, ContextTypes, CallbackQueryHandler
@@ -12,17 +12,72 @@ from starlette.responses import JSONResponse
 
 # Setup Logging
 logging.basicConfig(format="%(asctime)s - %(name)s - %(levelname)s - %(message)s", level=logging.INFO)
+logger = logging.getLogger(__name__)
 
 DATA = DataManager()
 
 # FastAPI App
-api_app = FastAPI(title="Anime Witcher API Service")
+api_app = FastAPI(title="Anime Witcher Service API")
 
 # Telegram Bot Setup
-TOKEN = "7570728074:AAEOACQzg60gq7QxeGoubYT1URNxigfijjg"
+TOKEN = os.environ.get("TELEGRAM_BOT_TOKEN", "7570728074:AAEOACQzg60gq7QxeGoubYT1URNxigfijjg")
 application = Application.builder().token(TOKEN).build()
 
-# Telegram Bot Handlers
+# --- API Endpoints ---
+
+@api_app.get("/")
+async def health_check():
+    return {"status": "active", "service": "Anime Witcher Hybrid Service"}
+
+@api_app.get("/get_links")
+async def get_links(query: str = Query(..., description="Anime Name and Episode (e.g. Sally 1)")):
+    anime_name, ep_num = DATA.parse_smart_query(query)
+    results = DATA.search_anime(anime_name)
+    
+    if not results:
+        return JSONResponse(content={"status": "error", "message": "No anime found"}, status_code=404)
+    
+    target_anime = results[0]
+    doc_ref = target_anime["doc_ref"]
+    episodes = DATA.get_episodes(doc_ref)
+    
+    target_ep = None
+    if ep_num is not None:
+        for ep in episodes:
+            if ep["order"] == ep_num:
+                target_ep = ep
+                break
+    else:
+        # Default to first episode if not specified
+        target_ep = episodes[0] if episodes else None
+
+    if not target_ep:
+        return JSONResponse(content={"status": "error", "message": "Episode not found"}, status_code=404)
+
+    servers = DATA.get_servers(doc_ref, target_ep["id"])
+    # Filter for PD links as requested by user for the API service
+    pd_only = [s for s in servers if "PD" in s["name"]]
+    
+    return {
+        "status": "success",
+        "anime": target_anime["name"],
+        "episode": ep_num or 1,
+        "links": pd_only if pd_only else servers
+    }
+
+@api_app.post("/telegram-webhook")
+async def telegram_webhook(request: Request):
+    try:
+        data = await request.json()
+        update = Update.de_json(data, application.bot)
+        await application.process_update(update)
+        return JSONResponse(content={"status": "ok"})
+    except Exception as e:
+        logger.error(f"Error processing webhook: {e}")
+        return JSONResponse(content={"status": "error", "message": str(e)}, status_code=500)
+
+# --- Telegram Bot Handlers ---
+
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user = update.effective_user
     welcome_text = (
@@ -49,7 +104,7 @@ async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "🔹 **طلب مباشر**: اكتب `[الاسم] [رقم الحلقة]` وسأجلب لك الروابط فوراً.\n"
         "🔹 **البحث**: اكتب اسم الأنمي فقط لعرض النتائج المتاحة.\n"
         "🔹 **سيرفر PD**: هو الأولوية لدينا لدعمه المشاهدة المباشرة داخل تليجرام.\n"
-        "🔹 **خدمة الـ API**: متوفرة للمطورين لجلب روابط PD فقط بتنسيق JSON.\n\n"
+        "🔹 **سيرفرات أخرى**: نحاول استخراج روابط M3u8 منها لتعمل مباشرة.\n\n"
         "💡 **مثال**: `ون بيس 1000`"
     )
     await update.message.reply_text(help_text, parse_mode="Markdown")
@@ -61,7 +116,7 @@ async def api_info(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "`GET /get_links?query=اسم_الأنمي_رقم_الحلقة`\n\n"
         "📍 **رابط الخدمة**: `https://web-production-68612.up.railway.app/get_links?query=Sally 1`\n\n"
         "✅ **المميزات**:\n"
-        "- يعيد روابط PD فقط.\n"
+        "- يعيد روابط PD المباشرة كأولوية.\n"
         "- الروابط محولة تلقائياً لتنسيق `?download` لتعمل كـ M3u8."
     )
     await update.message.reply_text(api_text, parse_mode="Markdown")
@@ -77,9 +132,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await help_command(update, context)
         return
 
-    # Smart Parsing
     anime_name, ep_num = DATA.parse_smart_query(text)
-    
     await update.message.reply_text(f"⏳ جاري البحث عن \'{anime_name}\'...")
     
     results = DATA.search_anime(anime_name)
@@ -88,7 +141,6 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
 
     if ep_num is not None:
-        # Service Mode: Directly get links for specific episode
         target_anime = results[0]
         doc_ref = target_anime["doc_ref"]
         episodes = DATA.get_episodes(doc_ref)
@@ -102,42 +154,35 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         if target_ep:
             servers = DATA.get_servers(doc_ref, target_ep["id"])
             if servers:
-                # Prioritize PD links for direct video sending
-                pd_link = next((s["url"] for s in servers if "💎 سيرفر PD" in s["name"]), None)
+                # Try to find a direct link (PD or resolved M3u8)
+                direct_link = next((s["url"] for s in servers if "PD" in s["name"] or ".m3u8" in s["url"].lower() or "download" in s["url"].lower()), None)
                 
-                if pd_link:
+                if direct_link:
                     await update.message.reply_text(f"✅ جاري إرسال الحلقة {ep_num} من {target_anime["name"]}...")
                     try:
-                        await update.message.reply_video(video=pd_link, caption=f"🎬 {target_anime["name"]} - الحلقة {ep_num}")
+                        await update.message.reply_video(video=direct_link, caption=f"🎬 {target_anime["name"]} - الحلقة {ep_num}")
                     except Exception as e:
-                        logging.error(f"Failed to send video: {e}")
-                        await update.message.reply_text(f"❌ فشل إرسال الفيديو مباشرة. يمكنك تجربة الرابط: {pd_link}")
+                        logger.error(f"Failed to send video: {e}")
+                        # Fallback to buttons if video sending fails
+                        keyboard = [[InlineKeyboardButton(s["name"], url=s["url"])] for s in servers]
+                        await update.message.reply_text(
+                            f"⚠️ فشل إرسال الفيديو مباشرة (قد يكون الحجم كبيراً). تفضل روابط المشاهدة:",
+                            reply_markup=InlineKeyboardMarkup(keyboard)
+                        )
                 else:
-                    # If no PD link, show other links as buttons
-                    keyboard = []
-                    for srv in servers:
-                        keyboard.append([InlineKeyboardButton(srv["name"], url=srv["url"])])
-                    reply_markup = InlineKeyboardMarkup(keyboard)
+                    keyboard = [[InlineKeyboardButton(s["name"], url=s["url"])] for s in servers]
                     await update.message.reply_text(
-                        f"❌ لم نجد سيرفر PD مباشر. تفضل الروابط الأخرى للحلقة {ep_num} من {target_anime["name"]}:",
-                        reply_markup=reply_markup,
-                        parse_mode="Markdown"
+                        f"📺 روابط المشاهدة للحلقة {ep_num} من {target_anime["name"]}:",
+                        reply_markup=InlineKeyboardMarkup(keyboard)
                     )
                 return
             else:
-                await update.message.reply_text(f"❌ لم نجد سيرفرات متاحة للحلقة {ep_num} من {target_anime["name"]}.")
+                await update.message.reply_text(f"❌ لم نجد سيرفرات متاحة للحلقة {ep_num}.")
         else:
-            await update.message.reply_text(f"❌ لم نجد الحلقة {ep_num} في قائمة حلقات {target_anime["name"]}.")
+            await update.message.reply_text(f"❌ لم نجد الحلقة {ep_num} في القائمة.")
 
-    # Standard Mode: Show results
-    keyboard = []
-    for res in results:
-        name = res.get("name", "Unknown")
-        doc_ref = res.get("doc_ref")
-        keyboard.append([InlineKeyboardButton(name, callback_data=f"details_{doc_ref}")])
-    
-    reply_markup = InlineKeyboardMarkup(keyboard)
-    await update.message.reply_text("✅ وجدنا هذه النتائج، اختر المطلوب:", reply_markup=reply_markup)
+    keyboard = [[InlineKeyboardButton(res.get("name", "Unknown"), callback_data=f"details_{res.get("doc_ref")}")] for res in results]
+    await update.message.reply_text("✅ وجدنا هذه النتائج، اختر المطلوب:", reply_markup=InlineKeyboardMarkup(keyboard))
 
 async def button_click(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
@@ -157,100 +202,82 @@ async def button_click(update: Update, context: ContextTypes.DEFAULT_TYPE):
             f"⭐ **التقييم**: {details["rating"]}\n"
             f"📅 **سنة العرض**: {details["year"]}\n"
             f"🎭 **التصنيف**: {details["genres"]}\n"
-            f"🏢 **الاستوديو**: {details["studio"]}\n"
             f"📺 **عدد الحلقات**: {details["episodes_count"]}\n\n"
             f"📖 **القصة**:\n{details["story"]}"
         )
-        
-        keyboard = [
-            [InlineKeyboardButton("📺 مشاهدة الحلقات", callback_data=f"eps_{doc_ref}")]
-        ]
-        reply_markup = InlineKeyboardMarkup(keyboard)
+        keyboard = [[InlineKeyboardButton("📺 مشاهدة الحلقات", callback_data=f"eps_{doc_ref}")]]
         
         if details["poster"]:
             try:
-                await query.message.reply_photo(photo=details["poster"], caption=msg, reply_markup=reply_markup, parse_mode="Markdown")
-            except Exception as e:
-                logging.error(f"Failed to send photo: {e}")
-                await query.edit_message_text(msg, reply_markup=reply_markup, parse_mode="Markdown")
+                await query.message.reply_photo(photo=details["poster"], caption=msg, reply_markup=InlineKeyboardMarkup(keyboard), parse_mode="Markdown")
+            except:
+                await query.edit_message_text(msg, reply_markup=InlineKeyboardMarkup(keyboard), parse_mode="Markdown")
         else:
-            await query.edit_message_text(msg, reply_markup=reply_markup, parse_mode="Markdown")
+            await query.edit_message_text(msg, reply_markup=InlineKeyboardMarkup(keyboard), parse_mode="Markdown")
 
     elif data.startswith("eps_"):
         doc_ref = data.replace("eps_", "")
         episodes = DATA.get_episodes(doc_ref)
         if not episodes:
-            await query.message.reply_text("❌ لا توجد حلقات متاحة حالياً.")
+            await query.message.reply_text("❌ لا توجد حلقات متاحة.")
             return
 
         keyboard = []
         row = []
-        for i, ep in enumerate(episodes):
+        for ep in episodes:
             row.append(InlineKeyboardButton(f"Ep {ep["order"]}", callback_data=f"srv|{doc_ref}|{ep["id"]}"))
             if len(row) == 4:
                 keyboard.append(row)
                 row = []
         if row: keyboard.append(row)
         
-        reply_markup = InlineKeyboardMarkup(keyboard)
-        await query.message.reply_text(f"🎬 **قائمة الحلقات ({len(episodes)})**\nاختر الحلقة للمشاهدة:", reply_markup=reply_markup, parse_mode="Markdown")
+        await query.message.reply_text(f"🎬 **قائمة الحلقات ({len(episodes)})**", reply_markup=InlineKeyboardMarkup(keyboard), parse_mode="Markdown")
 
     elif data.startswith("srv|"):
         _, doc_ref, ep_id = data.split("|")
-
         servers = DATA.get_servers(doc_ref, ep_id)
         if not servers:
-            await query.message.reply_text("❌ عذراً، لا توجد سيرفرات متاحة لهذه الحلقة.")
+            await query.message.reply_text("❌ لا توجد سيرفرات متاحة.")
             return
 
-        # Prioritize PD links for direct video sending
-        pd_link = next((s["url"] for s in servers if "💎 سيرفر PD" in s["name"]), None)
-
-        if pd_link:
-            await query.message.reply_text(f"✅ جاري إرسال الفيديو مباشرة...")
+        direct_link = next((s["url"] for s in servers if "PD" in s["name"]), None)
+        if direct_link:
+            await query.message.reply_text(f"✅ جاري محاولة إرسال الفيديو مباشرة...")
             try:
-                await query.message.reply_video(video=pd_link, caption=f"🎬 {doc_ref.split("/")[-1]} - الحلقة {ep_id}")
-            except Exception as e:
-                logging.error(f"Failed to send video: {e}")
-                await query.message.reply_text(f"❌ فشل إرسال الفيديو مباشرة. يمكنك تجربة الرابط: {pd_link}")
+                await query.message.reply_video(video=direct_link, caption=f"🎬 حلقة من {doc_ref.split("/")[-1]}")
+            except:
+                keyboard = [[InlineKeyboardButton(s["name"], url=s["url"])] for s in servers]
+                await query.message.reply_text("📺 روابط المشاهدة:", reply_markup=InlineKeyboardMarkup(keyboard))
         else:
-            keyboard = []
-            for srv in servers:
-                keyboard.append([InlineKeyboardButton(srv["name"], url=srv["url"])])
-            
-            reply_markup = InlineKeyboardMarkup(keyboard)
-            await query.message.reply_text("📺 **اختر سيرفر المشاهدة:**\n(سيرفر PD يدعم المشاهدة المباشرة)", reply_markup=reply_markup, parse_mode="Markdown")
+            keyboard = [[InlineKeyboardButton(s["name"], url=s["url"])] for s in servers]
+            await query.message.reply_text("📺 روابط المشاهدة المتاحة:", reply_markup=InlineKeyboardMarkup(keyboard))
 
-# Add handlers after function definitions
+# --- Lifecycle Management ---
+
 application.add_handler(CommandHandler("start", start))
 application.add_handler(CommandHandler("help", help_command))
 application.add_handler(CommandHandler("api", api_info))
 application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
 application.add_handler(CallbackQueryHandler(button_click))
 
-@api_app.post("/telegram-webhook")
-async def telegram_webhook(request: Request):
-    update = Update.de_json(await request.json(), application.bot)
-    await application.process_update(update)
-    return JSONResponse(content={"status": "ok"})
-
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    logging.info("Setting up Telegram webhook...")
-    webhook_url = os.environ.get("WEBHOOK_URL") # Ensure this env var is set in Railway/Render
+    logger.info("Initializing Bot...")
+    await application.initialize()
+    
+    webhook_url = os.environ.get("WEBHOOK_URL")
     if webhook_url:
         await application.bot.set_webhook(url=f"{webhook_url}/telegram-webhook")
-        logging.info(f"Webhook set to {webhook_url}/telegram-webhook")
-    else:
-        logging.warning("WEBHOOK_URL environment variable not set. Bot will not receive updates.")
+        logger.info(f"Webhook set to: {webhook_url}/telegram-webhook")
+    
+    await application.start()
     yield
-    logging.info("Shutting down Telegram bot...")
-    await application.bot.delete_webhook()
+    logger.info("Shutting down Bot...")
+    await application.stop()
+    await application.shutdown()
 
 api_app.router.lifespan_context = lifespan
 
 if __name__ == "__main__":
-    # This block will only run if bot.py is executed directly, not via uvicorn
-    # When deployed with uvicorn, the lifespan event will handle bot startup
-    logging.info("Running bot.py directly (for local testing). Starting FastAPI server.")
-    uvicorn.run(api_app, host="0.0.0.0", port=8000)
+    port = int(os.environ.get("PORT", 8000))
+    uvicorn.run(api_app, host="0.0.0.0", port=port)
