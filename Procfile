@@ -1,1 +1,1 @@
-web: python render_app.py
+web: uvicorn bot:api_app --host 0.0.0.0 --port $PORT
