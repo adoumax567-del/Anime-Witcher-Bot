@@ -9,8 +9,8 @@ class DataManager:
         self.firestore_base_url = f"https://firestore.googleapis.com/v1/projects/{self.firebase_project_id}/databases/(default)/documents"
         self.auth_url = f"https://identitytoolkit.googleapis.com/v1/accounts:signUp?key={self.firebase_api_key}"
         
-        self.algolia_app_id = "4W16Y84U3E"
-        self.algolia_api_key = "05615f5e8e815049360862088365922e"
+        self.algolia_app_id = "TDNMRH8LS3"
+        self.algolia_api_key = "26c2b6726dc4f2582c68e361a74e2374"
         self.id_token = None
         self.refresh_settings()
 
@@ -36,27 +36,59 @@ class DataManager:
         except:
             return []
 
+    def search_firestore(self, query):
+        # Due to permission issues with 'series' and 'anime_list_movies', we will only search 'anime_list' for now.
+        collections_to_search = ["anime_list"]
+        all_results = []
+
+        for coll in collections_to_search:
+            url = f"{self.firestore_base_url}/{coll}"
+            try:
+                res = requests.get(url, params={"key": self.firebase_api_key}, timeout=5)
+                if res.status_code == 200:
+                    documents = res.json().get("documents", [])
+                    for doc in documents:
+                        fields = doc.get("fields", {})
+                        name = fields.get("name", {}).get("stringValue", "").lower()
+                        if query.lower() in name:
+                            all_results.append({
+                                "objectID": doc.get("name").split("/")[-1],
+                                "name": fields.get("name", {}).get("stringValue", ""),
+                                "collection": coll
+                            })
+            except Exception as e:
+                logging.error(f"Error searching Firestore collection {coll}: {e}")
+        return all_results[:15]
+
     def search_anime(self, query):
+        # Try Algolia first
         indices = ["anime", "series", "movies"]
         all_hits = []
         with ThreadPoolExecutor(max_workers=3) as executor:
             futures = [executor.submit(self.search_algolia, idx, query) for idx in indices]
             for future in futures:
                 all_hits.extend(future.result())
-        seen = set()
+        
         unique_hits = []
+        seen = set()
         for hit in all_hits:
             oid = hit.get("objectID")
             if oid not in seen:
                 unique_hits.append(hit)
                 seen.add(oid)
-        return unique_hits[:15]
+        
+        if unique_hits:
+            return unique_hits[:15]
+        else:
+            # Fallback to Firestore search if Algolia yields no results
+            logging.info(f"Algolia search failed for \'{query}\' or returned no results, falling back to Firestore.")
+            return self.search_firestore(query)
 
     def get_anime_details(self, anime_id):
         def fetch(coll):
             url = f"{self.firestore_base_url}/{coll}/{anime_id}"
             try:
-                res = requests.get(url, timeout=3)
+                res = requests.get(url, params={"key": self.firebase_api_key}, timeout=3)
                 if res.status_code == 200:
                     f = res.json().get("fields", {})
                     return {
@@ -74,7 +106,8 @@ class DataManager:
                 return None
             return None
         with ThreadPoolExecutor(max_workers=2) as executor:
-            results = list(executor.map(fetch, ["anime_list", "anime_list_movies"]))
+            # Only query 'anime_list' for now due to permission issues with 'anime_list_movies'
+            results = list(executor.map(fetch, ["anime_list"]))
             for r in results:
                 if r: return r
         return None
@@ -82,7 +115,7 @@ class DataManager:
     def get_episodes(self, anime_id, collection):
         url = f"{self.firestore_base_url}/{collection}/{anime_id}/episodes"
         try:
-            res = requests.get(url, timeout=5)
+            res = requests.get(url, params={"key": self.firebase_api_key}, timeout=5)
             if res.status_code == 200:
                 docs = res.json().get("documents", [])
                 eps = []
@@ -91,11 +124,11 @@ class DataManager:
                     name = f.get("name", {}).get("stringValue", "Unknown")
                     eid = doc.get("name").split("/")[-1]
                     try:
-                        order = int(''.join(filter(str.isdigit, name)))
+                        order = int("".join(filter(str.isdigit, name)))
                     except:
                         order = 999
                     eps.append({"id": eid, "name": name, "order": order})
-                eps.sort(key=lambda x: x['order'])
+                eps.sort(key=lambda x: x["order"])
                 return eps
         except:
             pass
@@ -105,7 +138,7 @@ class DataManager:
         url = f"{self.firestore_base_url}/{collection}/{anime_id}/episodes/{episode_id}/servers"
         headers = {"Authorization": f"Bearer {self.id_token}"} if self.id_token else {}
         try:
-            res = requests.get(url, headers=headers, timeout=5)
+            res = requests.get(url, headers=headers, params={"key": self.firebase_api_key}, timeout=5)
             if res.status_code == 200:
                 docs = res.json().get("documents", [])
                 pd_links = []
@@ -122,10 +155,10 @@ class DataManager:
                             pd_links.append({"name": f"💎 سيرفر PD ({s_name})", "url": link})
                     
                     if "streamtape_video_id" in f:
-                        other_links.append({"name": f"🎬 Streamtape ({s_name})", "url": f"https://streamtape.com/e/{f['streamtape_video_id']['stringValue']}"})
+                        other_links.append({"name": f"🎬 Streamtape ({s_name})", "url": f"https://streamtape.com/e/{f["streamtape_video_id"]["stringValue"]}"})
                     if "vidtube_video_id" in f:
-                        other_links.append({"name": f"🎥 Vidtube ({s_name})", "url": f"https://vidtube.one/e/{f['vidtube_video_id']['stringValue']}"})
-                    if link.startswith("http") and not any(l['url'] == link for l in pd_links):
+                        other_links.append({"name": f"🎥 Vidtube ({s_name})", "url": f"https://vidtube.one/e/{f["vidtube_video_id"]["stringValue"]}"})
+                    if link.startswith("http") and not any(l["url"] == link for l in pd_links):
                         other_links.append({"name": f"🚀 مباشر ({s_name})", "url": link})
                 
                 # إرجاع PD أولاً ثم البقية
