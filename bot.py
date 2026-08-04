@@ -14,9 +14,11 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     welcome_text = (
         f"👋 أهلاً بك يا {user.first_name} في **Anime Witcher Service**!\n\n"
         "أنا بوت خدمي متطور لجلب روابط المشاهدة المباشرة فوراً.\n\n"
+        "🌐 **السيرفر الجديد**: https://web-production-68612.up.railway.app/\n\n"
         "🚀 **كيفية الاستخدام؟**\n"
         "اكتب اسم الأنمي متبوعاً برقم الحلقة للحصول على الروابط مباشرة.\n"
         "مثال: `ناروتو 1` أو `Sally Episode 5`\n\n"
+        "🔗 **خدمة API**: يمكنك استخدام `/api` لمعرفة كيفية استخدام الخدمة في تطبيقاتك.\n\n"
         "👇 أو استخدم الأزرار للبحث التقليدي!"
     )
     
@@ -32,10 +34,23 @@ async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "📖 **دليل الخدمة السريعة:**\n\n"
         "🔹 **طلب مباشر**: اكتب `[الاسم] [رقم الحلقة]` وسأجلب لك الروابط فوراً.\n"
         "🔹 **البحث**: اكتب اسم الأنمي فقط لعرض النتائج المتاحة.\n"
-        "🔹 **سيرفر PD**: هو الأولوية لدينا لدعمه المشاهدة المباشرة داخل تليجرام.\n\n"
+        "🔹 **سيرفر PD**: هو الأولوية لدينا لدعمه المشاهدة المباشرة داخل تليجرام.\n"
+        "🔹 **خدمة الـ API**: متوفرة للمطورين لجلب روابط PD فقط بتنسيق JSON.\n\n"
         "💡 **مثال**: `ون بيس 1000`"
     )
     await update.message.reply_text(help_text, parse_mode='Markdown')
+
+async def api_info(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    api_text = (
+        "🛠 **توثيق خدمة الـ API:**\n\n"
+        "يمكنك جلب روابط PD المباشرة لتطبيقك عبر المسار التالي:\n"
+        "`GET /get_links?query=اسم_الأنمي_رقم_الحلقة`\n\n"
+        "📍 **رابط الخدمة**: `https://web-production-68612.up.railway.app/get_links?query=Sally 1`\n\n"
+        "✅ **المميزات**:\n"
+        "- يعيد روابط PD فقط.\n"
+        "- الروابط محولة تلقائياً لتنسيق `?download` لتعمل كـ M3u8."
+    )
+    await update.message.reply_text(api_text, parse_mode='Markdown')
 
 async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     text = update.message.text
@@ -176,6 +191,7 @@ def main():
     
     app.add_handler(CommandHandler("start", start))
     app.add_handler(CommandHandler("help", help_command))
+    app.add_handler(CommandHandler("api", api_info))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
     app.add_handler(CallbackQueryHandler(button_click))
     

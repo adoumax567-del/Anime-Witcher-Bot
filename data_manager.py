@@ -132,6 +132,13 @@ class DataManager:
                     
                     if "pd" in s_name.lower() or "premium" in s_name.lower() or "direct" in s_name.lower():
                         if link.startswith("http"):
+                            # Transform PixelDrain links to direct download format
+                            if "pixeldrain.com" in link:
+                                # Match /u/ID or /api/file/ID
+                                pd_id_match = re.search(r"(?:/u/|/api/file/)([a-zA-Z0-9]+)", link)
+                                if pd_id_match:
+                                    pd_id = pd_id_match.group(1)
+                                    link = f"https://pixeldrain.com/api/file/{pd_id}?download"
                             pd_links.append({"name": f"💎 سيرفر PD ({s_name})", "url": link})
                     
                     if "streamtape_video_id" in f:

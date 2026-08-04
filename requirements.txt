@@ -1,5 +1,6 @@
-python-telegram-bot==22.8
+python-telegram-bot
 requests
-flask
+fastapi
+uvicorn
+python-dotenv
 gunicorn
-algoliasearch
