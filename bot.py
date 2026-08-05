@@ -81,13 +81,11 @@ async def telegram_webhook(request: Request):
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user = update.effective_user
     welcome_text = (
-        f"👋 أهلاً بك يا {user.first_name} في **Anime Witcher Service**!\n\n"
-        "أنا بوت خدمي متطور لجلب روابط المشاهدة المباشرة فوراً.\n\n"
-        "🌐 **السيرفر الجديد**: https://web-production-68612.up.railway.app/\n\n"
+        f"👋 أهلاً بك يا {user.first_name} في **Anime Witcher Bot**!\n\n"
+        "أنا بوت متخصص في جلب روابط المشاهدة المباشرة للأنمي.\n\n"
         "🚀 **كيفية الاستخدام؟**\n"
-        "اكتب اسم الأنمي متبوعاً برقم الحلقة للحصول على الروابط مباشرة.\n"
+        "اكتب اسم الأنمي متبوعاً برقم الحلقة للحصول على الفيديو مباشرة.\n"
         "مثال: `ناروتو 1` أو `Sally Episode 5`\n\n"
-        "🔗 **خدمة API**: يمكنك استخدام `/api` لمعرفة كيفية استخدام الخدمة في تطبيقاتك.\n\n"
         "👇 أو استخدم الأزرار للبحث التقليدي!"
     )
     
@@ -100,26 +98,14 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     help_text = (
-        "📖 **دليل الخدمة السريعة:**\n\n"
-        "🔹 **طلب مباشر**: اكتب `[الاسم] [رقم الحلقة]` وسأجلب لك الروابط فوراً.\n"
-        "🔹 **البحث**: اكتب اسم الأنمي فقط لعرض النتائج المتاحة.\n"
-        "🔹 **سيرفر PD**: هو الأولوية لدينا لدعمه المشاهدة المباشرة داخل تليجرام.\n"
-        "🔹 **سيرفرات أخرى**: نحاول استخراج روابط M3u8 منها لتعمل مباشرة.\n\n"
+        "📖 **دليل الاستخدام السريع:**\n\n"
+        "🔹 **طلب مباشر**: اكتب `[الاسم] [رقم الحلقة]` وسأجلب لك الفيديو فوراً.\n"
+        "🔹 **البحث**: اكتب اسم الأنمي فقط لعرض النتائج المتاحة.\n        "🔹 **المشاهدة المباشرة**: البوت يرسل الفيديو مباشرة لتشاهده داخل تليجرام.\n\n"
         "💡 **مثال**: `ون بيس 1000`"
     )
     await update.message.reply_text(help_text, parse_mode="Markdown")
 
-async def api_info(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    api_text = (
-        "🛠 **توثيق خدمة الـ API:**\n\n"
-        "يمكنك جلب روابط PD المباشرة لتطبيقك عبر المسار التالي:\n"
-        "`GET /get_links?query=اسم_الأنمي_رقم_الحلقة`\n\n"
-        "📍 **رابط الخدمة**: `https://web-production-68612.up.railway.app/get_links?query=Sally 1`\n\n"
-        "✅ **المميزات**:\n"
-        "- يعيد روابط PD المباشرة كأولوية.\n"
-        "- الروابط محولة تلقائياً لتنسيق `?download` لتعمل كـ M3u8."
-    )
-    await update.message.reply_text(api_text, parse_mode="Markdown")
+# Removed api_info command as per user request
 
 async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     text = update.message.text
@@ -154,8 +140,8 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         if target_ep:
             servers = DATA.get_servers(doc_ref, target_ep["id"])
             if servers:
-                # Try to find a direct link (PD or resolved M3u8)
-                direct_link = next((s["url"] for s in servers if "PD" in s["name"] or ".m3u8" in s["url"].lower() or "download" in s["url"].lower()), None)
+                # Prioritize PD links for direct video sending
+                direct_link = next((s["url"] for s in servers if "PD" in s["name"]), None)
                 
                 if direct_link:
                     await update.message.reply_text(f"✅ جاري إرسال الحلقة {ep_num} من {target_anime["name"]}...")
@@ -163,23 +149,14 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
                         await update.message.reply_video(video=direct_link, caption=f"🎬 {target_anime["name"]} - الحلقة {ep_num}")
                     except Exception as e:
                         logger.error(f"Failed to send video: {e}")
-                        # Fallback to buttons if video sending fails
-                        keyboard = [[InlineKeyboardButton(s["name"], url=s["url"])] for s in servers]
-                        await update.message.reply_text(
-                            f"⚠️ فشل إرسال الفيديو مباشرة (قد يكون الحجم كبيراً). تفضل روابط المشاهدة:",
-                            reply_markup=InlineKeyboardMarkup(keyboard)
-                        )
+                        await update.message.reply_text(f"❌ فشل إرسال الفيديو مباشرة. قد يكون الحجم كبيراً جداً أو هناك مشكلة مؤقتة.")
                 else:
-                    keyboard = [[InlineKeyboardButton(s["name"], url=s["url"])] for s in servers]
-                    await update.message.reply_text(
-                        f"📺 روابط المشاهدة للحلقة {ep_num} من {target_anime["name"]}:",
-                        reply_markup=InlineKeyboardMarkup(keyboard)
-                    )
+                    await update.message.reply_text(f"❌ لم نجد رابط PD مباشر للحلقة {ep_num} من {target_anime["name"]}. لا يمكن إرسال الفيديو مباشرة.")
                 return
             else:
-                await update.message.reply_text(f"❌ لم نجد سيرفرات متاحة للحلقة {ep_num}.")
+                await update.message.reply_text(f"❌ لم نجد سيرفرات متاحة للحلقة {ep_num} من {target_anime["name"]}.")
         else:
-            await update.message.reply_text(f"❌ لم نجد الحلقة {ep_num} في القائمة.")
+            await update.message.reply_text(f"❌ لم نجد الحلقة {ep_num} في قائمة حلقات {target_anime["name"]}.")
 
     keyboard = [[InlineKeyboardButton(res.get("name", "Unknown"), callback_data=f"details_{res.get("doc_ref")}")] for res in results]
     await update.message.reply_text("✅ وجدنا هذه النتائج، اختر المطلوب:", reply_markup=InlineKeyboardMarkup(keyboard))
@@ -219,7 +196,7 @@ async def button_click(update: Update, context: ContextTypes.DEFAULT_TYPE):
         doc_ref = data.replace("eps_", "")
         episodes = DATA.get_episodes(doc_ref)
         if not episodes:
-            await query.message.reply_text("❌ لا توجد حلقات متاحة.")
+            await query.message.reply_text("❌ لا توجد حلقات متاحة حالياً.")
             return
 
         keyboard = []
@@ -245,18 +222,17 @@ async def button_click(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await query.message.reply_text(f"✅ جاري محاولة إرسال الفيديو مباشرة...")
             try:
                 await query.message.reply_video(video=direct_link, caption=f"🎬 حلقة من {doc_ref.split("/")[-1]}")
-            except:
-                keyboard = [[InlineKeyboardButton(s["name"], url=s["url"])] for s in servers]
-                await query.message.reply_text("📺 روابط المشاهدة:", reply_markup=InlineKeyboardMarkup(keyboard))
+            except Exception as e:
+                logger.error(f"Failed to send video from callback: {e}")
+                await query.message.reply_text("❌ فشل إرسال الفيديو مباشرة. قد يكون الحجم كبيراً جداً أو هناك مشكلة مؤقتة.")
         else:
-            keyboard = [[InlineKeyboardButton(s["name"], url=s["url"])] for s in servers]
-            await query.message.reply_text("📺 روابط المشاهدة المتاحة:", reply_markup=InlineKeyboardMarkup(keyboard))
+            await query.message.reply_text("❌ لم نجد رابط PD مباشر. لا يمكن إرسال الفيديو مباشرة.")
 
 # --- Lifecycle Management ---
 
 application.add_handler(CommandHandler("start", start))
 application.add_handler(CommandHandler("help", help_command))
-application.add_handler(CommandHandler("api", api_info))
+# application.add_handler(CommandHandler("api", api_info)) # Removed as per user request
 application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
 application.add_handler(CallbackQueryHandler(button_click))
 
@@ -269,7 +245,9 @@ async def lifespan(app: FastAPI):
     if webhook_url:
         await application.bot.set_webhook(url=f"{webhook_url}/telegram-webhook")
         logger.info(f"Webhook set to: {webhook_url}/telegram-webhook")
-    
+    else:
+        logger.warning("WEBHOOK_URL environment variable not set. Telegram bot will not receive updates via webhook.")
+
     await application.start()
     yield
     logger.info("Shutting down Bot...")
