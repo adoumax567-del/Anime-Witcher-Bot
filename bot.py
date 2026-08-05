@@ -123,7 +123,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
 
     anime_name, ep_num = DATA.parse_smart_query(text)
-    await update.message.reply_text(f"⏳ جاري البحث عن \'{anime_name}\'...")
+    await update.message.reply_text(f"⏳ جاري البحث عن \'{anime_name}\'...", disable_web_page_preview=True)
     
     results = DATA.search_anime(anime_name)
     if not results:
@@ -150,18 +150,19 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
                     anime_title = target_anime.get("name", "Anime")
                     caption_text = f"🎬 {anime_title} - الحلقة {ep_num}"
                     
-                    # Use a hidden link in the caption to trigger inline player for large files
+                    # Using a hidden link in the caption to trigger inline player for large files
                     # This method allows Telegram to stream directly from the URL without downloading first
                     # and bypasses the bot's file size limits for direct uploads.
-                    hidden_link_caption = f"<a href='{direct_link}'>\u200c</a>{caption_text}"
+                    # The zero-width space character (\u200c) makes the link invisible to the user.
+                    hidden_link_html = f"<a href='{direct_link}'>\u200c</a>"
 
                     try:
                         await update.message.reply_text(
-                            text=hidden_link_caption,
+                            text=f"{hidden_link_html}{caption_text}",
                             parse_mode="HTML",
-                            disable_web_page_preview=False # Set to False to allow Telegram to generate the player
+                            disable_web_page_preview=False # Crucial for Telegram to generate the inline player
                         )
-                        await update.message.reply_text("✅ تم إرسال الفيديو للمشاهدة المباشرة. قد يستغرق التحميل بعض الوقت.")
+                        await update.message.reply_text("✅ تم إرسال الفيديو للمشاهدة المباشرة. اضغط على الرسالة أعلاه لتشغيل الفيديو فوراً.")
                     except Exception as e:
                         logger.error(f"Failed to send video with hidden link: {e}")
                         await update.message.reply_text("❌ فشل إرسال الفيديو مباشرة. قد يكون هناك مشكلة مؤقتة أو الرابط غير صالح.")
@@ -240,15 +241,15 @@ async def button_click(update: Update, context: ContextTypes.DEFAULT_TYPE):
         if direct_link:
             anime_title = doc_ref.split("/")[-1]
             caption_text = f"🎬 {anime_title} - الحلقة {ep_id}"
-            hidden_link_caption = f"<a href='{direct_link}'>\u200c</a>{caption_text}"
+            hidden_link_html = f"<a href='{direct_link}'>\u200c</a>"
 
             try:
                 await query.message.reply_text(
-                    text=hidden_link_caption,
+                    text=f"{hidden_link_html}{caption_text}",
                     parse_mode="HTML",
-                    disable_web_page_preview=False # Set to False to allow Telegram to generate the player
+                    disable_web_page_preview=False # Crucial for Telegram to generate the inline player
                 )
-                await query.message.reply_text("✅ تم إرسال الفيديو للمشاهدة المباشرة. قد يستغرق التحميل بعض الوقت.")
+                await query.message.reply_text("✅ تم إرسال الفيديو للمشاهدة المباشرة. اضغط على الرسالة أعلاه لتشغيل الفيديو فوراً.")
             except Exception as e:
                 logger.error(f"Failed to send video with hidden link from callback: {e}")
                 await query.message.reply_text("❌ فشل إرسال الفيديو مباشرة. قد يكون هناك مشكلة مؤقتة أو الرابط غير صالح.")

@@ -43,7 +43,12 @@ class DataManager:
             "X-Algolia-API-Key": self.algolia_api_key
         }
         try:
-            payload = {"params": f"query={query}&hitsPerPage=10"}
+            # Enhanced payload for fuzzy search and multi-language support
+            payload = {
+                "params": f"query={query}&hitsPerPage=10",
+                "queryLanguages": ["en", "ar", "es", "fr", "ja"], # Support multiple languages
+                "typoTolerance": "min" # Enable typo tolerance
+            }
             response = requests.post(url, headers=headers, json=payload, timeout=3)
             response.raise_for_status() # Raise HTTPError for bad responses (4xx or 5xx)
             return response.json().get("hits", [])
