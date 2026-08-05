@@ -3,6 +3,10 @@ import logging
 import re
 from concurrent.futures import ThreadPoolExecutor
 
+# Setup Logging
+logging.basicConfig(format="%(asctime)s - %(name)s - %(levelname)s - %(message)s", level=logging.INFO)
+logger = logging.getLogger(__name__)
+
 class DataManager:
     def __init__(self):
         # Firebase Credentials
@@ -24,8 +28,13 @@ class DataManager:
             auth_res = requests.post(self.auth_url, json=auth_payload, timeout=5)
             if auth_res.status_code == 200:
                 self.id_token = auth_res.json().get("idToken")
-        except:
-            pass
+                logger.info("Firebase ID token refreshed successfully.")
+            else:
+                logger.warning(f"Failed to refresh Firebase ID token: {auth_res.status_code} - {auth_res.text}")
+        except requests.exceptions.RequestException as e:
+            logger.error(f"Network error during Firebase ID token refresh: {e}")
+        except Exception as e:
+            logger.error(f"An unexpected error occurred during Firebase ID token refresh: {e}")
 
     def search_algolia(self, index, query):
         url = f"https://{self.algolia_app_id}-dsn.algolia.net/1/indexes/{index}/query"
@@ -36,8 +45,10 @@ class DataManager:
         try:
             payload = {"params": f"query={query}&hitsPerPage=10"}
             response = requests.post(url, headers=headers, json=payload, timeout=3)
+            response.raise_for_status() # Raise HTTPError for bad responses (4xx or 5xx)
             return response.json().get("hits", [])
-        except:
+        except requests.exceptions.RequestException as e:
+            logger.error(f"Algolia search failed for index {index} with query \'{query}\': {e}")
             return []
 
     def search_anime(self, query):
@@ -71,6 +82,7 @@ class DataManager:
         url = f"{self.firestore_base_url}/{doc_ref}"
         try:
             res = requests.get(url, params={"key": self.firebase_api_key}, timeout=3)
+            res.raise_for_status()
             if res.status_code == 200:
                 f = res.json().get("fields", {})
                 details = f.get("details", {}).get("mapValue", {}).get("fields", {})
@@ -85,14 +97,17 @@ class DataManager:
                     "poster": f.get("poster_uri", {}).get("stringValue", ""),
                     "doc_ref": doc_ref
                 }
+        except requests.exceptions.RequestException as e:
+            logger.error(f"Network error getting anime details for {doc_ref}: {e}")
         except Exception as e:
-            logging.error(f"Error getting anime details: {e}")
+            logger.error(f"Error getting anime details for {doc_ref}: {e}")
         return None
 
     def get_episodes(self, doc_ref):
         url = f"{self.firestore_base_url}/{doc_ref}/episodes"
         try:
             res = requests.get(url, params={"key": self.firebase_api_key}, timeout=5)
+            res.raise_for_status()
             if res.status_code == 200:
                 docs = res.json().get("documents", [])
                 eps = []
@@ -107,42 +122,61 @@ class DataManager:
                     eps.append({"id": eid, "name": name, "order": order})
                 eps.sort(key=lambda x: x["order"])
                 return eps
-        except:
-            pass
+        except requests.exceptions.RequestException as e:
+            logger.error(f"Network error getting episodes for {doc_ref}: {e}")
+        except Exception as e:
+            logger.error(f"Error getting episodes for {doc_ref}: {e}")
         return []
 
     def resolve_m3u8(self, url):
         """
         Try to resolve a streamable M3u8 link from an iframe/redirector link.
+        This function aims to return the most direct video URL for streaming.
         """
         if not url or not url.startswith("http"):
             return url
             
-        # 1. PixelDrain Direct
+        # 1. PixelDrain Direct Download Link (often streamable)
         if "pixeldrain.com" in url:
             pd_id_match = re.search(r"(?:/u/|/api/file/)([a-zA-Z0-9]+)", url)
             if pd_id_match:
-                return f"https://pixeldrain.com/api/file/{pd_id_match.group(1)}?download"
+                direct_link = f"https://pixeldrain.com/api/file/{pd_id_match.group(1)}?download"
+                logger.info(f"Resolved PixelDrain link to: {direct_link}")
+                return direct_link
         
-        # 2. MixDrop Direct (Simple guess if possible)
+        # 2. MixDrop (requires scraping for direct link, but we can return embed for now)
         if "mixdrop" in url:
-            # Mixdrop usually requires scraping, but sometimes we can find the ID
             match = re.search(r"/e/([a-zA-Z0-9]+)", url)
             if match:
-                return f"https://mixdrop.co/e/{match.group(1)}"
+                embed_link = f"https://mixdrop.co/e/{match.group(1)}"
+                logger.info(f"Resolved MixDrop embed link: {embed_link}")
+                return embed_link # This is an embed, not direct M3u8, but might work for some players
         
-        # 3. StreamTape
+        # 3. StreamTape (embed link)
         if "streamtape.com" in url:
             match = re.search(r"/(?:e|v)/([a-zA-Z0-9]+)", url)
             if match:
-                return f"https://streamtape.com/e/{match.group(1)}"
+                embed_link = f"https://streamtape.com/e/{match.group(1)}"
+                logger.info(f"Resolved StreamTape embed link: {embed_link}")
+                return embed_link
         
-        # 4. StreamWish
+        # 4. StreamWish (embed link)
         if "streamwish" in url or "strwish" in url:
             match = re.search(r"/e/([a-zA-Z0-9]+)", url)
             if match:
-                return f"https://streamwish.to/e/{match.group(1)}"
+                embed_link = f"https://streamwish.to/e/{match.group(1)}"
+                logger.info(f"Resolved StreamWish embed link: {embed_link}")
+                return embed_link
 
+        # 5. DoodStream (embed link)
+        if "doodstream" in url or "dood.to" in url:
+            match = re.search(r"/(?:e|d)/([a-zA-Z0-9]+)", url)
+            if match:
+                embed_link = f"https://dood.to/e/{match.group(1)}"
+                logger.info(f"Resolved DoodStream embed link: {embed_link}")
+                return embed_link
+
+        logger.info(f"No specific resolution for URL: {url}. Returning as is.")
         return url
 
     def get_servers(self, doc_ref, episode_id):
@@ -150,6 +184,7 @@ class DataManager:
         headers = {"Authorization": f"Bearer {self.id_token}"} if self.id_token else {}
         try:
             res = requests.get(url, headers=headers, params={"key": self.firebase_api_key}, timeout=5)
+            res.raise_for_status()
             if res.status_code == 200:
                 docs = res.json().get("documents", [])
                 all_servers = []
@@ -161,18 +196,22 @@ class DataManager:
                     
                     # Check for hidden fields in Anime Witcher's Firestore structure
                     if not link:
-                        for key in ["streamtape_video_id", "vidtube_video_id", "mixdrop_video_id", "doodstream_video_id"]:
-                            if key in f:
-                                val = f[key].get("stringValue", "")
-                                if "streamtape" in key: link = f"https://streamtape.com/e/{val}"
-                                elif "vidtube" in key: link = f"https://vidtube.one/e/{val}"
-                                elif "mixdrop" in key: link = f"https://mixdrop.co/e/{val}"
-                                elif "doodstream" in key: link = f"https://dood.to/e/{val}"
-                                break
+                        for key_prefix, base_url in [
+                            ("streamtape_video_id", "https://streamtape.com/e/"),
+                            ("vidtube_video_id", "https://vidtube.one/e/"),
+                            ("mixdrop_video_id", "https://mixdrop.co/e/"),
+                            ("doodstream_video_id", "https://dood.to/e/")
+                        ]:
+                            if key_prefix in f:
+                                val = f[key_prefix].get("stringValue", "")
+                                if val: # Ensure value is not empty
+                                    link = f"{base_url}{val}"
+                                    logger.info(f"Found hidden link for {key_prefix}: {link}")
+                                    break
                     
                     if link:
                         resolved_link = self.resolve_m3u8(link)
-                        is_pd = "pd" in s_name.lower() or "premium" in s_name.lower() or "pixeldrain" in resolved_link
+                        is_pd = "pd" in s_name.lower() or "premium" in s_name.lower() or "pixeldrain" in resolved_link.lower()
                         
                         server_info = {
                             "name": f"💎 PD ({s_name})" if is_pd else f"🚀 {s_name}",
@@ -184,8 +223,10 @@ class DataManager:
                 # Sort: PD first
                 all_servers.sort(key=lambda x: x["priority"])
                 return all_servers
+        except requests.exceptions.RequestException as e:
+            logger.error(f"Network error fetching servers for {doc_ref}/{episode_id}: {e}")
         except Exception as e:
-            logging.error(f"Error fetching servers: {e}")
+            logger.error(f"Error fetching servers for {doc_ref}/{episode_id}: {e}")
         return []
 
     def parse_smart_query(self, query):

@@ -3,6 +3,9 @@ import re
 import asyncio
 import os
 import uvicorn
+import httpx
+import tempfile
+import time
 from contextlib import asynccontextmanager
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup, ReplyKeyboardMarkup
 from telegram.ext import Application, CommandHandler, MessageHandler, filters, ContextTypes, CallbackQueryHandler
@@ -120,7 +123,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
 
     anime_name, ep_num = DATA.parse_smart_query(text)
-    await update.message.reply_text(f"⏳ جاري البحث عن '{anime_name}'...")
+    await update.message.reply_text(f"⏳ جاري البحث عن \'{anime_name}\'...")
     
     results = DATA.search_anime(anime_name)
     if not results:
@@ -144,13 +147,24 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 direct_link = next((s["url"] for s in servers if "PD" in s["name"]), None)
                 
                 if direct_link:
-                    anime_title = target_anime.get('name', 'Anime')
-                    await update.message.reply_text(f"✅ جاري إرسال الحلقة {ep_num} من {anime_title}...")
+                    anime_title = target_anime.get("name", "Anime")
+                    caption_text = f"🎬 {anime_title} - الحلقة {ep_num}"
+                    
+                    # Use a hidden link in the caption to trigger inline player for large files
+                    # This method allows Telegram to stream directly from the URL without downloading first
+                    # and bypasses the bot's file size limits for direct uploads.
+                    hidden_link_caption = f"<a href='{direct_link}'>\u200c</a>{caption_text}"
+
                     try:
-                        await update.message.reply_video(video=direct_link, caption=f"🎬 {anime_title} - الحلقة {ep_num}")
+                        await update.message.reply_text(
+                            text=hidden_link_caption,
+                            parse_mode="HTML",
+                            disable_web_page_preview=False # Set to False to allow Telegram to generate the player
+                        )
+                        await update.message.reply_text("✅ تم إرسال الفيديو للمشاهدة المباشرة. قد يستغرق التحميل بعض الوقت.")
                     except Exception as e:
-                        logger.error(f"Failed to send video: {e}")
-                        await update.message.reply_text("❌ فشل إرسال الفيديو مباشرة. قد يكون الحجم كبيراً جداً أو هناك مشكلة مؤقتة.")
+                        logger.error(f"Failed to send video with hidden link: {e}")
+                        await update.message.reply_text("❌ فشل إرسال الفيديو مباشرة. قد يكون هناك مشكلة مؤقتة أو الرابط غير صالح.")
                 else:
                     await update.message.reply_text(f"❌ لم نجد رابط PD مباشر للحلقة {ep_num}. لا يمكن إرسال الفيديو مباشرة.")
                 return
@@ -159,7 +173,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         else:
             await update.message.reply_text(f"❌ لم نجد الحلقة {ep_num} في القائمة.")
 
-    keyboard = [[InlineKeyboardButton(res.get("name", "Unknown"), callback_data=f"details_{res.get('doc_ref')}")] for res in results]
+    keyboard = [[InlineKeyboardButton(res.get("name", "Unknown"), callback_data=f"details_{res.get("doc_ref")}")] for res in results]
     await update.message.reply_text("✅ وجدنا هذه النتائج، اختر المطلوب:", reply_markup=InlineKeyboardMarkup(keyboard))
 
 async def button_click(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -176,12 +190,12 @@ async def button_click(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
         msg = (
             f"🍥 **معلومات الأنمي**\n\n"
-            f"🎬 **الاسم**: {details.get('name', 'N/A')}\n"
-            f"⭐ **التقييم**: {details.get('rating', 'N/A')}\n"
-            f"📅 **سنة العرض**: {details.get('year', 'N/A')}\n"
-            f"🎭 **التصنيف**: {details.get('genres', 'N/A')}\n"
-            f"📺 **عدد الحلقات**: {details.get('episodes_count', 'N/A')}\n\n"
-            f"📖 **القصة**:\n{details.get('story', 'No story available.')}"
+            f"🎬 **الاسم**: {details.get("name", "N/A")}\n"
+            f"⭐ **التقييم**: {details.get("rating", "N/A")}\n"
+            f"📅 **سنة العرض**: {details.get("year", "N/A")}\n"
+            f"🎭 **التصنيف**: {details.get("genres", "N/A")}\n"
+            f"📺 **عدد الحلقات**: {details.get("episodes_count", "N/A")}\n\n"
+            f"📖 **القصة**:\n{details.get("story", "No story available.")}"
         )
         keyboard = [[InlineKeyboardButton("📺 مشاهدة الحلقات", callback_data=f"eps_{doc_ref}")]]
         
@@ -204,7 +218,7 @@ async def button_click(update: Update, context: ContextTypes.DEFAULT_TYPE):
         keyboard = []
         row = []
         for ep in episodes:
-            row.append(InlineKeyboardButton(f"Ep {ep.get('order', '?')}", callback_data=f"srv|{doc_ref}|{ep.get('id')}"))
+            row.append(InlineKeyboardButton(f"Ep {ep.get("order", "?")}", callback_data=f"srv|{doc_ref}|{ep.get("id")}"))
             if len(row) == 4:
                 keyboard.append(row)
                 row = []
@@ -224,12 +238,20 @@ async def button_click(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
         direct_link = next((s["url"] for s in servers if "PD" in s["name"]), None)
         if direct_link:
-            await query.message.reply_text("✅ جاري محاولة إرسال الفيديو مباشرة...")
+            anime_title = doc_ref.split("/")[-1]
+            caption_text = f"🎬 {anime_title} - الحلقة {ep_id}"
+            hidden_link_caption = f"<a href='{direct_link}'>\u200c</a>{caption_text}"
+
             try:
-                await query.message.reply_video(video=direct_link, caption=f"🎬 حلقة من {doc_ref.split('/')[-1]}")
+                await query.message.reply_text(
+                    text=hidden_link_caption,
+                    parse_mode="HTML",
+                    disable_web_page_preview=False # Set to False to allow Telegram to generate the player
+                )
+                await query.message.reply_text("✅ تم إرسال الفيديو للمشاهدة المباشرة. قد يستغرق التحميل بعض الوقت.")
             except Exception as e:
-                logger.error(f"Failed to send video from callback: {e}")
-                await query.message.reply_text("❌ فشل إرسال الفيديو مباشرة. قد يكون الحجم كبيراً جداً.")
+                logger.error(f"Failed to send video with hidden link from callback: {e}")
+                await query.message.reply_text("❌ فشل إرسال الفيديو مباشرة. قد يكون هناك مشكلة مؤقتة أو الرابط غير صالح.")
         else:
             await query.message.reply_text("❌ لم نجد رابط PD مباشر.")
 
@@ -247,7 +269,7 @@ async def lifespan(app: FastAPI):
     
     webhook_url = os.environ.get("WEBHOOK_URL")
     if webhook_url:
-        webhook_path = f"{webhook_url.rstrip('/')}/telegram-webhook"
+        webhook_path = f"{webhook_url.rstrip("/")}/telegram-webhook"
         await application.bot.set_webhook(url=webhook_path)
         logger.info(f"Webhook set to: {webhook_path}")
     
