@@ -7,7 +7,7 @@ import httpx
 import tempfile
 import time
 from contextlib import asynccontextmanager
-from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup, ReplyKeyboardMarkup
+from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup, ReplyKeyboardMarkup, InputFile
 from telegram.ext import Application, CommandHandler, MessageHandler, filters, ContextTypes, CallbackQueryHandler
 from data_manager import DataManager
 from fastapi import FastAPI, Query, Request
@@ -111,6 +111,54 @@ async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     )
     await update.message.reply_text(help_text, parse_mode="Markdown")
 
+async def send_video_robustly(update: Update, context: ContextTypes.DEFAULT_TYPE, direct_link: str, anime_title: str, ep_num: int):
+    caption_text = f"🎬 {anime_title} - الحلقة {ep_num}"
+    
+    processing_msg = await update.message.reply_text("⏳ جاري تجهيز الفيديو... قد يستغرق الأمر بعض الوقت.")
+    temp_file_path = None
+    try:
+        async with httpx.AsyncClient() as client:
+            # Stream download to a temporary file
+            async with client.stream("GET", direct_link, follow_redirects=True, timeout=600) as response: # Increased timeout
+                response.raise_for_status()
+                total_size = int(response.headers.get("content-length", 0))
+                downloaded_size = 0
+                last_update_time = time.time()
+
+                with tempfile.NamedTemporaryFile(delete=False, suffix=".mp4") as temp_file:
+                    temp_file_path = temp_file.name
+                    async for chunk in response.aiter_bytes():
+                        temp_file.write(chunk)
+                        downloaded_size += len(chunk)
+                        
+                        # Update progress every 5 seconds or 10% of total size
+                        if time.time() - last_update_time > 5 and total_size > 0:
+                            progress = (downloaded_size / total_size) * 100
+                            await processing_msg.edit_text(f"⏳ جاري التحميل: {progress:.1f}% من {total_size / (1024*1024):.1f}MB")
+                            last_update_time = time.time()
+                
+                await processing_msg.edit_text("✅ تم التحميل. جاري الرفع إلى تليجرام...")
+                
+                # Re-upload the downloaded video file as a video to ensure inline playback
+                with open(temp_file_path, "rb") as video_file:
+                    await update.message.reply_video(
+                        video=InputFile(video_file, filename=f"{anime_title}_Ep{ep_num}.mp4"),
+                        caption=caption_text,
+                        parse_mode="Markdown",
+                        supports_streaming=True,
+                        read_timeout=600, # Increased timeout for large files
+                        write_timeout=600,
+                        connect_timeout=60
+                    )
+                await processing_msg.edit_text("✅ تم إرسال الفيديو للمشاهدة المباشرة. اضغط على الفيديو أعلاه لتشغيله فوراً.")
+
+    except Exception as e:
+        logger.error(f"Failed to download and upload video: {e}")
+        await processing_msg.edit_text("❌ فشل إرسال الفيديو مباشرة. قد يكون هناك مشكلة في التحميل أو الرابط غير صالح.")
+    finally:
+        if temp_file_path and os.path.exists(temp_file_path):
+            os.remove(temp_file_path)
+
 async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     text = update.message.text
     if text in ["🔍 بحث عن أنمي", "📺 مشاهدة حلقات", "ℹ️ معلومات أنمي"]:
@@ -144,28 +192,11 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         if target_ep:
             servers = DATA.get_servers(doc_ref, target_ep.get("id"))
             if servers:
-                direct_link = next((s["url"] for s in servers if "PD" in s["name"]), None)
+                direct_link = next((s["url"] for s in servers if "PD" in s["name"] or "pixeldrain" in s["url"].lower()), None)
                 
                 if direct_link:
                     anime_title = target_anime.get("name", "Anime")
-                    caption_text = f"🎬 {anime_title} - الحلقة {ep_num}"
-                    
-                    # Using a hidden link in the caption to trigger inline player for large files
-                    # This method allows Telegram to stream directly from the URL without downloading first
-                    # and bypasses the bot's file size limits for direct uploads.
-                    # The zero-width space character (\u200c) makes the link invisible to the user.
-                    hidden_link_html = f"<a href='{direct_link}'>\u200c</a>"
-
-                    try:
-                        await update.message.reply_text(
-                            text=f"{hidden_link_html}{caption_text}",
-                            parse_mode="HTML",
-                            disable_web_page_preview=False # Crucial for Telegram to generate the inline player
-                        )
-                        await update.message.reply_text("✅ تم إرسال الفيديو للمشاهدة المباشرة. اضغط على الرسالة أعلاه لتشغيل الفيديو فوراً.")
-                    except Exception as e:
-                        logger.error(f"Failed to send video with hidden link: {e}")
-                        await update.message.reply_text("❌ فشل إرسال الفيديو مباشرة. قد يكون هناك مشكلة مؤقتة أو الرابط غير صالح.")
+                    await send_video_robustly(update, context, direct_link, anime_title, ep_num)
                 else:
                     await update.message.reply_text(f"❌ لم نجد رابط PD مباشر للحلقة {ep_num}. لا يمكن إرسال الفيديو مباشرة.")
                 return
@@ -204,7 +235,8 @@ async def button_click(update: Update, context: ContextTypes.DEFAULT_TYPE):
         if poster:
             try:
                 await query.message.reply_photo(photo=poster, caption=msg, reply_markup=InlineKeyboardMarkup(keyboard), parse_mode="Markdown")
-            except:
+            except Exception as e:
+                logger.error(f"Failed to send photo with caption: {e}")
                 await query.edit_message_text(msg, reply_markup=InlineKeyboardMarkup(keyboard), parse_mode="Markdown")
         else:
             await query.edit_message_text(msg, reply_markup=InlineKeyboardMarkup(keyboard), parse_mode="Markdown")
@@ -237,22 +269,10 @@ async def button_click(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await query.message.reply_text("❌ لا توجد سيرفرات متاحة.")
             return
 
-        direct_link = next((s["url"] for s in servers if "PD" in s["name"]), None)
+        direct_link = next((s["url"] for s in servers if "PD" in s["name"] or "pixeldrain" in s["url"].lower()), None)
         if direct_link:
             anime_title = doc_ref.split("/")[-1]
-            caption_text = f"🎬 {anime_title} - الحلقة {ep_id}"
-            hidden_link_html = f"<a href='{direct_link}'>\u200c</a>"
-
-            try:
-                await query.message.reply_text(
-                    text=f"{hidden_link_html}{caption_text}",
-                    parse_mode="HTML",
-                    disable_web_page_preview=False # Crucial for Telegram to generate the inline player
-                )
-                await query.message.reply_text("✅ تم إرسال الفيديو للمشاهدة المباشرة. اضغط على الرسالة أعلاه لتشغيل الفيديو فوراً.")
-            except Exception as e:
-                logger.error(f"Failed to send video with hidden link from callback: {e}")
-                await query.message.reply_text("❌ فشل إرسال الفيديو مباشرة. قد يكون هناك مشكلة مؤقتة أو الرابط غير صالح.")
+            await send_video_robustly(query.message, context, direct_link, anime_title, int(ep_id))
         else:
             await query.message.reply_text("❌ لم نجد رابط PD مباشر.")
 

@@ -8,3 +8,5 @@ starlette>=0.14.2
 httpx>=0.23.0
 anyio>=3.4.0
 pydantic>=1.9.0
+python-Levenshtein==0.25.1
+fuzzywuzzy==0.18.0

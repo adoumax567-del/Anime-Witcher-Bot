@@ -1,7 +1,11 @@
+import firebase_admin
+from firebase_admin import credentials, firestore
+import os
+import re
 import requests
 import logging
-import re
 from concurrent.futures import ThreadPoolExecutor
+from fuzzywuzzy import fuzz
 
 # Setup Logging
 logging.basicConfig(format="%(asctime)s - %(name)s - %(levelname)s - %(message)s", level=logging.INFO)
@@ -9,15 +13,33 @@ logger = logging.getLogger(__name__)
 
 class DataManager:
     def __init__(self):
-        # Firebase Credentials
-        self.firebase_api_key = "AIzaSyAcbWRwfFNnCpoydDXlEALWnM_TYVcJOMU"
-        self.firebase_project_id = "animewitcher-1c66d"
+        if not firebase_admin._apps:
+            # Use a dictionary to hold credentials if not using a file
+            cred_config = {
+                "type": os.environ.get("FIREBASE_TYPE"),
+                "project_id": os.environ.get("FIREBASE_PROJECT_ID"),
+                "private_key_id": os.environ.get("FIREBASE_PRIVATE_KEY_ID"),
+                "private_key": os.environ.get("FIREBASE_PRIVATE_KEY").replace("\\n", "\n"),
+                "client_email": os.environ.get("FIREBASE_CLIENT_EMAIL"),
+                "client_id": os.environ.get("FIREBASE_CLIENT_ID"),
+                "auth_uri": os.environ.get("FIREBASE_AUTH_URI"),
+                "token_uri": os.environ.get("FIREBASE_TOKEN_URI"),
+                "auth_provider_x509_cert_url": os.environ.get("FIREBASE_AUTH_PROVIDER_X509_CERT_URL"),
+                "client_x509_cert_url": os.environ.get("FIREBASE_CLIENT_X509_CERT_URL")
+            }
+            cred = credentials.Certificate(cred_config)
+            firebase_admin.initialize_app(cred)
+        
+        self.db = firestore.client()
+        self.anime_collection = self.db.collection("anime_list")
+
+        # Correct Algolia Credentials from Settings/search_service
+        self.algolia_app_id = os.environ.get("ALGOLIA_APP_ID", "D8LH9I7ZL7")
+        self.algolia_api_key = os.environ.get("ALGOLIA_API_KEY", "b56c01ef52540ef334bcdbaa00ded9e4")
+        self.firebase_api_key = os.environ.get("FIREBASE_API_KEY", "AIzaSyAcbWRwfFNnCpoydDXlEALWnM_TYVcJOMU")
+        self.firebase_project_id = os.environ.get("FIREBASE_PROJECT_ID", "animewitcher-1c66d")
         self.firestore_base_url = f"https://firestore.googleapis.com/v1/projects/{self.firebase_project_id}/databases/(default)/documents"
         self.auth_url = f"https://identitytoolkit.googleapis.com/v1/accounts:signUp?key={self.firebase_api_key}"
-        
-        # Correct Algolia Credentials from Settings/search_service
-        self.algolia_app_id = "D8LH9I7ZL7"
-        self.algolia_api_key = "b56c01ef52540ef334bcdbaa00ded9e4"
         
         self.id_token = None
         self.refresh_settings()
@@ -57,6 +79,7 @@ class DataManager:
             return []
 
     def search_anime(self, query):
+        # First, try Algolia search
         indices = ["all_anime", "series"]
         all_hits = []
         with ThreadPoolExecutor(max_workers=2) as executor:
@@ -81,7 +104,27 @@ class DataManager:
                 })
                 seen.add(oid)
         
-        return unique_hits[:15]
+        # If Algolia returns results, sort them by fuzzy ratio and return top 5
+        if unique_hits:
+            unique_hits.sort(key=lambda x: fuzz.ratio(query.lower(), x.get("name", "").lower()), reverse=True)
+            return unique_hits[:5]
+
+        # Fallback to Firestore if Algolia returns no results or fails
+        logger.info(f"Algolia returned no results for '{query}', falling back to Firestore fuzzy search.")
+        all_anime_docs = self.anime_collection.stream()
+        fuzzy_matches = []
+        for doc in all_anime_docs:
+            data = doc.to_dict()
+            anime_name = data.get("name")
+            if anime_name:
+                score = fuzz.token_set_ratio(query.lower(), anime_name.lower())
+                if score > 60:  # Threshold for a reasonable match
+                    data["doc_ref"] = doc.reference.path
+                    data["score"] = score
+                    fuzzy_matches.append(data)
+        
+        fuzzy_matches.sort(key=lambda x: x["score"], reverse=True)
+        return fuzzy_matches[:5]
 
     def get_anime_details(self, doc_ref):
         url = f"{self.firestore_base_url}/{doc_ref}"
@@ -110,8 +153,9 @@ class DataManager:
 
     def get_episodes(self, doc_ref):
         url = f"{self.firestore_base_url}/{doc_ref}/episodes"
+        headers = {"Authorization": f"Bearer {self.id_token}"} if self.id_token else {}
         try:
-            res = requests.get(url, params={"key": self.firebase_api_key}, timeout=5)
+            res = requests.get(url, headers=headers, params={"key": self.firebase_api_key}, timeout=5)
             res.raise_for_status()
             if res.status_code == 200:
                 docs = res.json().get("documents", [])
