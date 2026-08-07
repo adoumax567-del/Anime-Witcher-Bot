@@ -13,39 +13,46 @@ logger = logging.getLogger(__name__)
 
 class DataManager:
     def __init__(self):
+        self.firebase_project_id = os.environ.get("FIREBASE_PROJECT_ID", "animewitcher-1c66d")
+        
         if not firebase_admin._apps:
-            cred_config = {
-                "type": os.environ.get("FIREBASE_TYPE"),
-                "project_id": os.environ.get("FIREBASE_PROJECT_ID"),
-                "private_key_id": os.environ.get("FIREBASE_PRIVATE_KEY_ID"),
-                "private_key": os.environ.get("FIREBASE_PRIVATE_KEY", "").replace("\\n", "\n"),
-                "client_email": os.environ.get("FIREBASE_CLIENT_EMAIL"),
-                "client_id": os.environ.get("FIREBASE_CLIENT_ID"),
-                "auth_uri": os.environ.get("FIREBASE_AUTH_URI"),
-                "token_uri": os.environ.get("FIREBASE_TOKEN_URI"),
-                "auth_provider_x509_cert_url": os.environ.get("FIREBASE_AUTH_PROVIDER_X509_CERT_URL"),
-                "client_x509_cert_url": os.environ.get("FIREBASE_CLIENT_X509_CERT_URL")
-            }
-            if not cred_config["private_key"] or not cred_config["project_id"]:
-                try:
-                    firebase_admin.initialize_app()
-                except ValueError:
-                    pass
-            else:
-                try:
+            try:
+                # 1. Try to initialize with provided Service Account JSON from environment
+                private_key = os.environ.get("FIREBASE_PRIVATE_KEY")
+                if private_key:
+                    cred_config = {
+                        "type": os.environ.get("FIREBASE_TYPE", "service_account"),
+                        "project_id": self.firebase_project_id,
+                        "private_key_id": os.environ.get("FIREBASE_PRIVATE_KEY_ID"),
+                        "private_key": private_key.replace("\\n", "\n"),
+                        "client_email": os.environ.get("FIREBASE_CLIENT_EMAIL"),
+                        "client_id": os.environ.get("FIREBASE_CLIENT_ID"),
+                        "auth_uri": "https://accounts.google.com/o/oauth2/auth",
+                        "token_uri": "https://oauth2.googleapis.com/token",
+                        "auth_provider_x509_cert_url": "https://www.googleapis.com/oauth2/v1/certs",
+                        "client_x509_cert_url": os.environ.get("FIREBASE_CLIENT_X509_CERT_URL")
+                    }
                     cred = credentials.Certificate(cred_config)
                     firebase_admin.initialize_app(cred)
-                except Exception as e:
-                    logger.warning(f"Failed to initialize with cert config: {e}. Trying default.")
+                    logger.info("Firebase initialized with Service Account.")
+                else:
+                    # 2. Fallback: Initialize with only Project ID for public read access
+                    # This avoids the DefaultCredentialsError on Render/Railway
+                    firebase_admin.initialize_app(options={'projectId': self.firebase_project_id})
+                    logger.info(f"Firebase initialized with Project ID: {self.firebase_project_id} (Public Access)")
+            except Exception as e:
+                logger.error(f"Firebase Initialization Error: {e}")
+                # Last resort: empty initialization
+                if not firebase_admin._apps:
                     firebase_admin.initialize_app()
-        
+
         self.db = firestore.client()
         self.anime_collection = self.db.collection("anime_list")
 
+        # Algolia & API Config
         self.algolia_app_id = os.environ.get("ALGOLIA_APP_ID", "D8LH9I7ZL7")
         self.algolia_api_key = os.environ.get("ALGOLIA_API_KEY", "b56c01ef52540ef334bcdbaa00ded9e4")
         self.firebase_api_key = os.environ.get("FIREBASE_API_KEY", "AIzaSyAcbWRwfFNnCpoydDXlEALWnM_TYVcJOMU")
-        self.firebase_project_id = os.environ.get("FIREBASE_PROJECT_ID", "animewitcher-1c66d")
         self.firestore_base_url = f"https://firestore.googleapis.com/v1/projects/{self.firebase_project_id}/databases/(default)/documents"
         self.auth_url = f"https://identitytoolkit.googleapis.com/v1/accounts:signUp?key={self.firebase_api_key}"
         
