@@ -1,6 +1,7 @@
 fastapi
 uvicorn[standard]
-python-telegram-bot[ext]
+pyrogram
+tgcrypto
 requests
 httpx
 rapidfuzz
