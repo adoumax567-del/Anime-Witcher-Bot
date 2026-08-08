@@ -4,10 +4,9 @@ import asyncio
 import os
 import uvicorn
 import httpx
-import tempfile
 import time
 from contextlib import asynccontextmanager
-from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup, ReplyKeyboardMarkup, InputFile
+from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup, ReplyKeyboardMarkup
 from telegram.ext import Application, CommandHandler, MessageHandler, filters, ContextTypes, CallbackQueryHandler
 from data_manager import DataManager
 from fastapi import FastAPI, Query, Request
@@ -24,7 +23,8 @@ api_app = FastAPI(title="Anime Witcher Service API")
 
 # Telegram Bot Setup
 TOKEN = os.environ.get("TELEGRAM_BOT_TOKEN", "7570728074:AAEOACQzg60gq7QxeGoubYT1URNxigfijjg")
-application = Application.builder().token(TOKEN).build()
+# Increase timeouts for better reliability
+application = Application.builder().token(TOKEN).connect_timeout(30).read_timeout(30).write_timeout(30).build()
 
 # --- API Endpoints ---
 
@@ -37,7 +37,6 @@ async def get_links(query: str = Query(..., description="Anime Name and Episode 
     try:
         anime_name, ep_num = DATA.parse_smart_query(query)
         results = DATA.search_anime(anime_name)
-        
         if not results:
             return JSONResponse(content={"status": "error", "message": "No anime found"}, status_code=404)
         
@@ -45,26 +44,16 @@ async def get_links(query: str = Query(..., description="Anime Name and Episode 
         doc_ref = target_anime["doc_ref"]
         episodes = DATA.get_episodes(doc_ref)
         
-        target_ep = None
-        if ep_num is not None:
-            for ep in episodes:
-                if ep["order"] == ep_num:
-                    target_ep = ep
-                    break
-        else:
-            target_ep = episodes[0] if episodes else None
-
+        target_ep = next((ep for ep in episodes if ep["order"] == ep_num), episodes[0] if episodes else None)
         if not target_ep:
             return JSONResponse(content={"status": "error", "message": "Episode not found"}, status_code=404)
 
         servers = DATA.get_servers(doc_ref, target_ep["id"])
-        pd_only = [s for s in servers if "PD" in s["name"]]
-        
         return {
             "status": "success",
             "anime": target_anime.get("name", "Unknown"),
             "episode": ep_num or 1,
-            "links": pd_only if pd_only else servers
+            "links": servers
         }
     except Exception as e:
         logger.error(f"API Error: {e}")
@@ -84,129 +73,71 @@ async def telegram_webhook(request: Request):
 # --- Telegram Bot Handlers ---
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    user = update.effective_user
     welcome_text = (
-        f"👋 أهلاً بك يا {user.first_name} في **Anime Witcher Bot**!\n\n"
-        "أنا بوت متخصص في جلب روابط المشاهدة المباشرة للأنمي.\n\n"
+        f"👋 أهلاً بك في **Anime Witcher Bot**!\n\n"
+        "أنا بوت متخصص في جلب حلقات الأنمي للمشاهدة المباشرة.\n\n"
         "🚀 **كيفية الاستخدام؟**\n"
-        "اكتب اسم الأنمي متبوعاً برقم الحلقة للحصول على الفيديو مباشرة.\n"
-        "مثال: `ناروتو 1` أو `Sally Episode 5`\n\n"
-        "👇 أو استخدم الأزرار للبحث التقليدي!"
+        "اكتب اسم الأنمي متبوعاً برقم الحلقة.\n"
+        "مثال: `ون بيس 1000`"
     )
-    
-    keyboard = [
-        ["🔍 بحث عن أنمي", "📺 مشاهدة حلقات"],
-        ["ℹ️ معلومات أنمي", "❓ مساعدة"]
-    ]
-    reply_markup = ReplyKeyboardMarkup(keyboard, resize_keyboard=True)
-    await update.message.reply_text(welcome_text, reply_markup=reply_markup, parse_mode="Markdown")
+    keyboard = [["🔍 بحث عن أنمي", "📺 مشاهدة حلقات"], ["ℹ️ معلومات أنمي", "❓ مساعدة"]]
+    await update.message.reply_text(welcome_text, reply_markup=ReplyKeyboardMarkup(keyboard, resize_keyboard=True), parse_mode="Markdown")
 
-async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    help_text = (
-        "📖 **دليل الاستخدام السريع:**\n\n"
-        "🔹 **طلب مباشر**: اكتب `[الاسم] [رقم الحلقة]` وسأجلب لك الفيديو فوراً.\n"
-        "🔹 **البحث**: اكتب اسم الأنمي فقط لعرض النتائج المتاحة.\n"
-        "🔹 **المشاهدة المباشرة**: البوت يرسل الفيديو مباشرة لتشاهده داخل تليجرام.\n\n"
-        "💡 **مثال**: `ون بيس 1000`"
-    )
-    await update.message.reply_text(help_text, parse_mode="Markdown")
-
-async def send_video_robustly(update: Update, context: ContextTypes.DEFAULT_TYPE, direct_link: str, anime_title: str, ep_num: int):
-    caption_text = f"🎬 {anime_title} - الحلقة {ep_num}"
-    
-    processing_msg = await update.message.reply_text("⏳ جاري تجهيز الفيديو... قد يستغرق الأمر بعض الوقت.")
-    temp_file_path = None
+async def send_video_direct(update: Update, context: ContextTypes.DEFAULT_TYPE, video_url: str, caption: str):
+    """Sends video directly using URL to ensure instant playback without server-side download delay."""
+    processing_msg = await update.message.reply_text("⏳ جاري استخراج الفيديو... ثوانٍ من فضلك.")
     try:
-        async with httpx.AsyncClient() as client:
-            # Stream download to a temporary file
-            async with client.stream("GET", direct_link, follow_redirects=True, timeout=600) as response: # Increased timeout
-                response.raise_for_status()
-                total_size = int(response.headers.get("content-length", 0))
-                downloaded_size = 0
-                last_update_time = time.time()
-
-                with tempfile.NamedTemporaryFile(delete=False, suffix=".mp4") as temp_file:
-                    temp_file_path = temp_file.name
-                    async for chunk in response.aiter_bytes():
-                        temp_file.write(chunk)
-                        downloaded_size += len(chunk)
-                        
-                        # Update progress every 5 seconds or 10% of total size
-                        if time.time() - last_update_time > 5 and total_size > 0:
-                            progress = (downloaded_size / total_size) * 100
-                            await processing_msg.edit_text(f"⏳ جاري التحميل: {progress:.1f}% من {total_size / (1024*1024):.1f}MB")
-                            last_update_time = time.time()
-                
-                await processing_msg.edit_text("✅ تم التحميل. جاري الرفع إلى تليجرام...")
-                
-                # Re-upload the downloaded video file as a video to ensure inline playback
-                with open(temp_file_path, "rb") as video_file:
-                    await update.message.reply_video(
-                        video=InputFile(video_file, filename=f"{anime_title}_Ep{ep_num}.mp4"),
-                        caption=caption_text,
-                        parse_mode="Markdown",
-                        supports_streaming=True,
-                        read_timeout=600, # Increased timeout for large files
-                        write_timeout=600,
-                        connect_timeout=60
-                    )
-                await processing_msg.edit_text("✅ تم إرسال الفيديو للمشاهدة المباشرة. اضغط على الفيديو أعلاه لتشغيله فوراً.")
-
+        # Using URL directly is the fastest way for Telegram to process videos if they are streamable
+        await update.message.reply_video(
+            video=video_url,
+            caption=caption,
+            supports_streaming=True,
+            parse_mode="Markdown"
+        )
+        await processing_msg.delete()
     except Exception as e:
-        logger.error(f"Failed to download and upload video: {e}")
-        await processing_msg.edit_text("❌ فشل إرسال الفيديو مباشرة. قد يكون هناك مشكلة في التحميل أو الرابط غير صالح.")
-    finally:
-        if temp_file_path and os.path.exists(temp_file_path):
-            os.remove(temp_file_path)
+        logger.error(f"Direct video send failed: {e}")
+        # Fallback: Provide the link if direct video fails
+        await processing_msg.edit_text(
+            f"❌ فشل تشغيل الفيديو تلقائياً داخل تليجرام.\n\n🔗 **يمكنك المشاهدة عبر الرابط المباشر:**\n[اضغط هنا للمشاهدة]({video_url})",
+            parse_mode="Markdown"
+        )
 
 async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     text = update.message.text
     if text in ["🔍 بحث عن أنمي", "📺 مشاهدة حلقات", "ℹ️ معلومات أنمي"]:
-        await update.message.reply_text("📝 من فضلك أرسل اسم الأنمي الذي تبحث عنه...")
-        context.user_data["action"] = text
+        await update.message.reply_text("📝 أرسل اسم الأنمي الذي تبحث عنه...")
         return
-
     if text == "❓ مساعدة":
-        await help_command(update, context)
+        await update.message.reply_text("اكتب اسم الأنمي + رقم الحلقة (مثال: ناروتو 1)")
         return
 
     anime_name, ep_num = DATA.parse_smart_query(text)
-    await update.message.reply_text(f"⏳ جاري البحث عن \'{anime_name}\'...", disable_web_page_preview=True)
+    status_msg = await update.message.reply_text(f"🔍 جاري البحث عن: {anime_name}...")
     
     results = DATA.search_anime(anime_name)
     if not results:
-        await update.message.reply_text("❌ عذراً، لم نجد نتائج. تأكد من كتابة الاسم بشكل صحيح.")
+        await status_msg.edit_text("❌ لم نجد نتائج، تأكد من الاسم.")
         return
 
     if ep_num is not None:
         target_anime = results[0]
-        doc_ref = target_anime.get("doc_ref")
-        episodes = DATA.get_episodes(doc_ref)
-        
-        target_ep = None
-        for ep in episodes:
-            if ep.get("order") == ep_num:
-                target_ep = ep
-                break
+        episodes = DATA.get_episodes(target_anime["doc_ref"])
+        target_ep = next((ep for ep in episodes if ep["order"] == ep_num), None)
         
         if target_ep:
-            servers = DATA.get_servers(doc_ref, target_ep.get("id"))
-            if servers:
-                direct_link = next((s["url"] for s in servers if "PD" in s["name"] or "pixeldrain" in s["url"].lower()), None)
-                
-                if direct_link:
-                    anime_title = target_anime.get("name", "Anime")
-                    await send_video_robustly(update, context, direct_link, anime_title, ep_num)
-                else:
-                    await update.message.reply_text(f"❌ لم نجد رابط PD مباشر للحلقة {ep_num}. لا يمكن إرسال الفيديو مباشرة.")
+            servers = DATA.get_servers(target_anime["doc_ref"], target_ep["id"])
+            pd_link = next((s["url"] for s in servers if "PD" in s["name"] or "pixeldrain" in s["url"].lower()), None)
+            if pd_link:
+                await status_msg.delete()
+                await send_video_direct(update, context, pd_link, f"🎬 **{target_anime['name']}** - الحلقة {ep_order}")
                 return
             else:
-                await update.message.reply_text("❌ لم نجد سيرفرات متاحة لهذه الحلقة.")
-        else:
-            await update.message.reply_text(f"❌ لم نجد الحلقة {ep_num} في القائمة.")
+                await status_msg.edit_text("❌ لم نجد رابط PD مباشر لهذه الحلقة.")
+                return
 
-    keyboard = [[InlineKeyboardButton(res.get("name", "Unknown"), callback_data=f"details_{res.get("doc_ref")}")] for res in results]
-    await update.message.reply_text("✅ وجدنا هذه النتائج، اختر المطلوب:", reply_markup=InlineKeyboardMarkup(keyboard))
+    keyboard = [[InlineKeyboardButton(res["name"], callback_data=f"details_{res['doc_ref']}")] for res in results]
+    await status_msg.edit_text("✅ اختر الأنمي المطلوب:", reply_markup=InlineKeyboardMarkup(keyboard))
 
 async def button_click(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
@@ -216,87 +147,51 @@ async def button_click(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if data.startswith("details_"):
         doc_ref = data.replace("details_", "")
         details = DATA.get_anime_details(doc_ref)
-        if not details:
-            await query.edit_message_text("❌ فشل جلب التفاصيل.")
-            return
-
-        msg = (
-            f"🍥 **معلومات الأنمي**\n\n"
-            f"🎬 **الاسم**: {details.get("name", "N/A")}\n"
-            f"⭐ **التقييم**: {details.get("rating", "N/A")}\n"
-            f"📅 **سنة العرض**: {details.get("year", "N/A")}\n"
-            f"🎭 **التصنيف**: {details.get("genres", "N/A")}\n"
-            f"📺 **عدد الحلقات**: {details.get("episodes_count", "N/A")}\n\n"
-            f"📖 **القصة**:\n{details.get("story", "No story available.")}"
-        )
-        keyboard = [[InlineKeyboardButton("📺 مشاهدة الحلقات", callback_data=f"eps_{doc_ref}")]]
-        
-        poster = details.get("poster")
-        if poster:
-            try:
-                await query.message.reply_photo(photo=poster, caption=msg, reply_markup=InlineKeyboardMarkup(keyboard), parse_mode="Markdown")
-            except Exception as e:
-                logger.error(f"Failed to send photo with caption: {e}")
+        if details:
+            msg = f"🍥 **{details['name']}**\n⭐ التقييم: {details['rating']}\n📺 الحلقات: {details['episodes_count']}\n\n📖 {details['story'][:300]}..."
+            keyboard = [[InlineKeyboardButton("📺 عرض الحلقات", callback_data=f"eps_{doc_ref}")]]
+            if details.get("poster"):
+                await query.message.reply_photo(photo=details["poster"], caption=msg, reply_markup=InlineKeyboardMarkup(keyboard), parse_mode="Markdown")
+            else:
                 await query.edit_message_text(msg, reply_markup=InlineKeyboardMarkup(keyboard), parse_mode="Markdown")
-        else:
-            await query.edit_message_text(msg, reply_markup=InlineKeyboardMarkup(keyboard), parse_mode="Markdown")
 
     elif data.startswith("eps_"):
         doc_ref = data.replace("eps_", "")
         episodes = DATA.get_episodes(doc_ref)
-        if not episodes:
-            await query.message.reply_text("❌ لا توجد حلقات متاحة حالياً.")
-            return
-
         keyboard = []
         row = []
-        for ep in episodes:
-            row.append(InlineKeyboardButton(f"Ep {ep.get("order", "?")}", callback_data=f"srv|{doc_ref}|{ep.get("id")}"))
+        for ep in episodes[:40]: # Limit to first 40 for UI
+            row.append(InlineKeyboardButton(f"H {ep['order']}", callback_data=f"srv|{doc_ref}|{ep['id']}|{ep['order']}"))
             if len(row) == 4:
                 keyboard.append(row)
                 row = []
         if row: keyboard.append(row)
-        
-        await query.message.reply_text(f"🎬 **قائمة الحلقات ({len(episodes)})**", reply_markup=InlineKeyboardMarkup(keyboard), parse_mode="Markdown")
+        await query.message.reply_text("🎬 اختر الحلقة:", reply_markup=InlineKeyboardMarkup(keyboard))
 
     elif data.startswith("srv|"):
         parts = data.split("|")
-        if len(parts) < 3: return
-        doc_ref, ep_id = parts[1], parts[2]
-        
+        doc_ref, ep_id, ep_order = parts[1], parts[2], parts[3]
         servers = DATA.get_servers(doc_ref, ep_id)
-        if not servers:
-            await query.message.reply_text("❌ لا توجد سيرفرات متاحة.")
-            return
-
-        direct_link = next((s["url"] for s in servers if "PD" in s["name"] or "pixeldrain" in s["url"].lower()), None)
-        if direct_link:
-            anime_title = doc_ref.split("/")[-1]
-            await send_video_robustly(query.message, context, direct_link, anime_title, int(ep_id))
+        pd_link = next((s["url"] for s in servers if "PD" in s["name"] or "pixeldrain" in s["url"].lower()), None)
+        if pd_link:
+            await send_video_direct(query.message, context, pd_link, f"🎬 الحلقة {ep_order}")
         else:
-            await query.message.reply_text("❌ لم نجد رابط PD مباشر.")
+            await query.message.reply_text("❌ رابط PD غير متوفر حالياً.")
 
-# --- Lifecycle Management ---
+# --- Lifecycle ---
 
 application.add_handler(CommandHandler("start", start))
-application.add_handler(CommandHandler("help", help_command))
 application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
 application.add_handler(CallbackQueryHandler(button_click))
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    logger.info("Initializing Bot...")
     await application.initialize()
-    
     webhook_url = os.environ.get("WEBHOOK_URL")
     if webhook_url:
-        webhook_path = f"{webhook_url.rstrip("/")}/telegram-webhook"
-        await application.bot.set_webhook(url=webhook_path)
-        logger.info(f"Webhook set to: {webhook_path}")
-    
+        await application.bot.set_webhook(url=f"{webhook_url.rstrip('/')}/telegram-webhook")
     await application.start()
     yield
-    logger.info("Shutting down Bot...")
     await application.stop()
     await application.shutdown()
 
