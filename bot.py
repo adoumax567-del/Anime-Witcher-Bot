@@ -74,7 +74,7 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "أنا بوت متخصص في جلب **روابط المشاهدة المباشرة** للأنمي.\n\n"
         "🚀 **كيفية الاستخدام؟**\n"
         "اكتب اسم الأنمي ورقم الحلقة (مثال: ون بيس 1000)\n"
-        "وسأعطيك رابط المشاهدة المباشر فوراً."
+        "وسأعطيك رابط المشاهدة المباشر الذي يفتح في المتصفح فوراً."
     )
     keyboard = [["🔍 بحث عن أنمي", "📺 مشاهدة حلقات"]]
     await update.message.reply_text(welcome, reply_markup=ReplyKeyboardMarkup(keyboard, resize_keyboard=True), parse_mode="Markdown")
@@ -103,18 +103,20 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
             pd_server = next((s for s in servers if "PD" in s["name"] or "pixeldrain" in s["url"].lower()), None)
             
             if pd_server:
-                keyboard = [[InlineKeyboardButton("🎬 مشاهدة الحلقة الآن", url=pd_server["url"])]]
-                await status_msg.edit_text(
-                    f"✅ تم العثور على **{target['name']}** - الحلقة {ep_num}\n\nاضغط على الزر أدناه للمشاهدة في المتصفح:",
+                keyboard = [[InlineKeyboardButton("🎬 مشاهدة الحلقة الآن (في المتصفح)", url=pd_server["url"])]]
+                await status_msg.delete()
+                await update.message.reply_text(
+                    f"🎬 **{target['name']}** - الحلقة {ep_num}\n\n"
+                    f"🔗 **رابط المشاهدة المباشر:**\n`{pd_server['url']}`\n\n"
+                    "اضغط على الزر أدناه للمشاهدة فوراً في المتصفح:",
                     reply_markup=InlineKeyboardMarkup(keyboard),
                     parse_mode="Markdown"
                 )
                 return
             elif servers:
-                # If no PD, show other servers
                 keyboard = [[InlineKeyboardButton(f"🔗 {s['name']}", url=s['url'])] for s in servers[:5]]
                 await status_msg.edit_text(
-                    f"✅ تم العثور على **{target['name']}** - الحلقة {ep_num}\n\nاختر سيرفر المشاهدة:",
+                    f"✅ تم العثور على **{target['name']}** - الحلقة {ep_num}\n\nاختر سيرفر المشاهدة (سيفتح في المتصفح):",
                     reply_markup=InlineKeyboardMarkup(keyboard),
                     parse_mode="Markdown"
                 )
@@ -150,7 +152,7 @@ async def cb_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 buttons.append(row)
                 row = []
         if row: buttons.append(row)
-        await query.message.reply_text("🎬 اختر الحلقة للمشاهدة:", reply_markup=InlineKeyboardMarkup(buttons))
+        await query.message.reply_text("🎬 اختر الحلقة للمشاهدة (ستفتح في المتصفح):", reply_markup=InlineKeyboardMarkup(buttons))
 
     elif data.startswith("srv|"):
         _, doc_ref, ep_id, ep_order = data.split("|")
@@ -164,15 +166,11 @@ async def cb_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             keyboard.append([InlineKeyboardButton(f"🎬 {s['name']}", url=s['url'])])
         
         await query.message.reply_text(
-            f"🎬 روابط مشاهدة الحلقة {ep_order}:\n(اضغط على الرابط لفتح المشغل في المتصفح)",
+            f"🎬 روابط مشاهدة الحلقة {ep_order}:\n(اضغط على الرابط لفتح المشغل في المتصفح فوراً)",
             reply_markup=InlineKeyboardMarkup(keyboard)
         )
 
 # --- Lifecycle ---
-
-application.add_handler(CommandHandler("start", start))
-application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_text))
-application.add_handler(CallbackQueryHandler(cb_handler))
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
