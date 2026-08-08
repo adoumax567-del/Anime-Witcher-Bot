@@ -1,5 +1,3 @@
-import firebase_admin
-from firebase_admin import credentials, firestore
 import os
 import re
 import requests
@@ -13,53 +11,22 @@ logger = logging.getLogger(__name__)
 
 class DataManager:
     def __init__(self):
+        # Configuration
+        self.firebase_api_key = os.environ.get("FIREBASE_API_KEY", "AIzaSyAcbWRwfFNnCpoydDXlEALWnM_TYVcJOMU")
         self.firebase_project_id = os.environ.get("FIREBASE_PROJECT_ID", "animewitcher-1c66d")
-        
-        if not firebase_admin._apps:
-            try:
-                # 1. Try to initialize with provided Service Account JSON from environment
-                private_key = os.environ.get("FIREBASE_PRIVATE_KEY")
-                if private_key:
-                    cred_config = {
-                        "type": os.environ.get("FIREBASE_TYPE", "service_account"),
-                        "project_id": self.firebase_project_id,
-                        "private_key_id": os.environ.get("FIREBASE_PRIVATE_KEY_ID"),
-                        "private_key": private_key.replace("\\n", "\n"),
-                        "client_email": os.environ.get("FIREBASE_CLIENT_EMAIL"),
-                        "client_id": os.environ.get("FIREBASE_CLIENT_ID"),
-                        "auth_uri": "https://accounts.google.com/o/oauth2/auth",
-                        "token_uri": "https://oauth2.googleapis.com/token",
-                        "auth_provider_x509_cert_url": "https://www.googleapis.com/oauth2/v1/certs",
-                        "client_x509_cert_url": os.environ.get("FIREBASE_CLIENT_X509_CERT_URL")
-                    }
-                    cred = credentials.Certificate(cred_config)
-                    firebase_admin.initialize_app(cred)
-                    logger.info("Firebase initialized with Service Account.")
-                else:
-                    # 2. Fallback: Initialize with only Project ID for public read access
-                    # This avoids the DefaultCredentialsError on Render/Railway
-                    firebase_admin.initialize_app(options={'projectId': self.firebase_project_id})
-                    logger.info(f"Firebase initialized with Project ID: {self.firebase_project_id} (Public Access)")
-            except Exception as e:
-                logger.error(f"Firebase Initialization Error: {e}")
-                # Last resort: empty initialization
-                if not firebase_admin._apps:
-                    firebase_admin.initialize_app()
-
-        self.db = firestore.client()
-        self.anime_collection = self.db.collection("anime_list")
-
-        # Algolia & API Config
         self.algolia_app_id = os.environ.get("ALGOLIA_APP_ID", "D8LH9I7ZL7")
         self.algolia_api_key = os.environ.get("ALGOLIA_API_KEY", "b56c01ef52540ef334bcdbaa00ded9e4")
-        self.firebase_api_key = os.environ.get("FIREBASE_API_KEY", "AIzaSyAcbWRwfFNnCpoydDXlEALWnM_TYVcJOMU")
+        
+        # Base URLs
         self.firestore_base_url = f"https://firestore.googleapis.com/v1/projects/{self.firebase_project_id}/databases/(default)/documents"
         self.auth_url = f"https://identitytoolkit.googleapis.com/v1/accounts:signUp?key={self.firebase_api_key}"
         
         self.id_token = None
         self.refresh_settings()
+        logger.info("DataManager initialized using REST API (No firebase-admin required).")
 
     def refresh_settings(self):
+        """Refreshes the Firebase ID token for authenticated requests."""
         try:
             auth_payload = {"returnSecureToken": True}
             auth_res = requests.post(self.auth_url, json=auth_payload, timeout=5)
@@ -72,6 +39,7 @@ class DataManager:
             logger.error(f"Error during Firebase ID token refresh: {e}")
 
     def search_algolia(self, index, query):
+        """Searches Algolia for anime records."""
         url = f"https://{self.algolia_app_id}-dsn.algolia.net/1/indexes/{index}/query"
         headers = {
             "X-Algolia-Application-Id": self.algolia_app_id,
@@ -91,6 +59,7 @@ class DataManager:
             return []
 
     def search_anime(self, query):
+        """Hybrid search: Algolia first, then Firestore REST API fallback."""
         indices = ["all_anime", "series"]
         all_hits = []
         with ThreadPoolExecutor(max_workers=2) as executor:
@@ -116,58 +85,64 @@ class DataManager:
                 seen.add(oid)
         
         if unique_hits:
+            # Sort by fuzzy ratio to get the most relevant result first
             unique_hits.sort(key=lambda x: fuzz.ratio(query.lower(), x.get("name", "").lower()), reverse=True)
             return unique_hits[:5]
 
-        logger.info(f"Algolia returned no results for '{query}', falling back to Firestore fuzzy search.")
+        # Fallback: Firestore REST API search (Listing documents)
+        logger.info(f"Algolia returned no results for '{query}', falling back to Firestore REST API.")
         try:
-            all_anime_docs = self.anime_collection.stream()
-            fuzzy_matches = []
-            for doc in all_anime_docs:
-                data = doc.to_dict()
-                anime_name = data.get("name")
-                if anime_name:
-                    score = fuzz.token_set_ratio(query.lower(), anime_name.lower())
-                    if score > 60:
-                        data["doc_ref"] = doc.reference.path
-                        data["score"] = score
-                        fuzzy_matches.append(data)
-            
-            fuzzy_matches.sort(key=lambda x: x["score"], reverse=True)
-            return fuzzy_matches[:5]
+            url = f"{self.firestore_base_url}/anime_list"
+            res = requests.get(url, params={"key": self.firebase_api_key, "pageSize": 50}, timeout=5)
+            if res.status_code == 200:
+                docs = res.json().get("documents", [])
+                fuzzy_matches = []
+                for doc in docs:
+                    f = doc.get("fields", {})
+                    name = f.get("name", {}).get("stringValue", "")
+                    if name:
+                        score = fuzz.token_set_ratio(query.lower(), name.lower())
+                        if score > 60:
+                            doc_path = "/".join(doc.get("name").split("/")[-2:]) # e.g. anime_list/ID
+                            fuzzy_matches.append({
+                                "name": name,
+                                "doc_ref": doc_path,
+                                "score": score
+                            })
+                fuzzy_matches.sort(key=lambda x: x["score"], reverse=True)
+                return fuzzy_matches[:5]
         except Exception as e:
-            logger.error(f"Firestore fallback search error: {e}")
-            return []
+            logger.error(f"Firestore REST fallback search error: {e}")
+        return []
 
     def get_anime_details(self, doc_ref):
+        """Fetches full anime details via Firestore REST API."""
         url = f"{self.firestore_base_url}/{doc_ref}"
         try:
             res = requests.get(url, params={"key": self.firebase_api_key}, timeout=3)
             res.raise_for_status()
-            if res.status_code == 200:
-                f = res.json().get("fields", {})
-                details = f.get("details", {}).get("mapValue", {}).get("fields", {})
-                return {
-                    "name": f.get("name", {}).get("stringValue", "غير متوفر"),
-                    "story": f.get("story", {}).get("stringValue", "لا يوجد وصف."),
-                    "rating": f.get("rating", {}).get("mapValue", {}).get("fields", {}).get("rate", {}).get("doubleValue", "N/A"),
-                    "year": details.get("year", {}).get("stringValue", "N/A"),
-                    "genres": ", ".join([v.get("stringValue") for v in f.get("tags", {}).get("arrayValue", {}).get("values", [])]),
-                    "episodes_count": details.get("eps_num", {}).get("stringValue", "1"),
-                    "studio": ", ".join([v.get("stringValue") for v in details.get("studio", {}).get("arrayValue", {}).get("values", [])]) if "studio" in details else "غير معروف",
-                    "poster": f.get("poster_uri", {}).get("stringValue", ""),
-                    "doc_ref": doc_ref
-                }
+            f = res.json().get("fields", {})
+            details = f.get("details", {}).get("mapValue", {}).get("fields", {})
+            return {
+                "name": f.get("name", {}).get("stringValue", "غير متوفر"),
+                "story": f.get("story", {}).get("stringValue", "لا يوجد وصف."),
+                "rating": f.get("rating", {}).get("mapValue", {}).get("fields", {}).get("rate", {}).get("doubleValue", "N/A"),
+                "year": details.get("year", {}).get("stringValue", "N/A"),
+                "genres": ", ".join([v.get("stringValue") for v in f.get("tags", {}).get("arrayValue", {}).get("values", [])]) if "tags" in f else "N/A",
+                "episodes_count": details.get("eps_num", {}).get("stringValue", "1"),
+                "poster": f.get("poster_uri", {}).get("stringValue", ""),
+                "doc_ref": doc_ref
+            }
         except Exception as e:
             logger.error(f"Error getting anime details for {doc_ref}: {e}")
         return None
 
     def get_episodes(self, doc_ref):
+        """Fetches episodes list via Firestore REST API."""
         url = f"{self.firestore_base_url}/{doc_ref}/episodes"
         headers = {"Authorization": f"Bearer {self.id_token}"} if self.id_token else {}
         try:
             res = requests.get(url, headers=headers, params={"key": self.firebase_api_key}, timeout=5)
-            res.raise_for_status()
             if res.status_code == 200:
                 docs = res.json().get("documents", [])
                 eps = []
@@ -187,14 +162,14 @@ class DataManager:
         return []
 
     def resolve_m3u8(self, url):
+        """Converts common video links to direct or streamable formats."""
         if not url or not url.startswith("http"):
             return url
             
         if "pixeldrain.com" in url:
             pd_id_match = re.search(r"(?:/u/|/api/file/)([a-zA-Z0-9]+)", url)
             if pd_id_match:
-                direct_link = f"https://pixeldrain.com/api/file/{pd_id_match.group(1)}?download"
-                return direct_link
+                return f"https://pixeldrain.com/api/file/{pd_id_match.group(1)}?download"
         
         for platform, base_url in [
             ("mixdrop", "https://mixdrop.co/e/"),
@@ -206,19 +181,17 @@ class DataManager:
                 match = re.search(r"/(?:e|v|d)/([a-zA-Z0-9]+)", url)
                 if match:
                     return f"{base_url}{match.group(1)}"
-                    
         return url
 
     def get_servers(self, doc_ref, episode_id):
+        """Fetches streaming servers via Firestore REST API."""
         url = f"{self.firestore_base_url}/{doc_ref}/episodes/{episode_id}/servers"
         headers = {"Authorization": f"Bearer {self.id_token}"} if self.id_token else {}
         try:
             res = requests.get(url, headers=headers, params={"key": self.firebase_api_key}, timeout=5)
-            res.raise_for_status()
             if res.status_code == 200:
                 docs = res.json().get("documents", [])
                 all_servers = []
-                
                 for doc in docs:
                     f = doc.get("fields", {})
                     s_name = f.get("name", {}).get("stringValue", "سيرفر")
@@ -240,14 +213,11 @@ class DataManager:
                     if link:
                         resolved_link = self.resolve_m3u8(link)
                         is_pd = "pd" in s_name.lower() or "premium" in s_name.lower() or "pixeldrain" in resolved_link.lower()
-                        
-                        server_info = {
+                        all_servers.append({
                             "name": f"💎 PD ({s_name})" if is_pd else f"🚀 {s_name}",
                             "url": resolved_link,
                             "priority": 1 if is_pd else 2
-                        }
-                        all_servers.append(server_info)
-                
+                        })
                 all_servers.sort(key=lambda x: x["priority"])
                 return all_servers
         except Exception as e:
@@ -255,6 +225,7 @@ class DataManager:
         return []
 
     def parse_smart_query(self, query):
+        """Parses user input to extract anime name and episode number."""
         patterns = [
             r"(.+)\s+(?:episode|ep|الحلقة|حلقة)\s+(\d+)",
             r"(.+)\s+(\d+)$"
@@ -263,4 +234,4 @@ class DataManager:
             match = re.search(pattern, query, re.IGNORECASE)
             if match:
                 return match.group(1).strip(), int(match.group(2))
-        return query, None
+        return query.strip(), None

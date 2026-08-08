@@ -1,7 +1,6 @@
 fastapi
 uvicorn[standard]
 python-telegram-bot[ext]
-firebase-admin
 requests
 httpx
 rapidfuzz
