@@ -6,3 +6,4 @@ requests
 httpx
 rapidfuzz
 python-dotenv
+nest_asyncio

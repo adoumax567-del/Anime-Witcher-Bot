@@ -5,11 +5,16 @@ import os
 import uvicorn
 import httpx
 import time
+import nest_asyncio
 from contextlib import asynccontextmanager
+
+# Apply nest_asyncio to allow nested event loops (common for Pyrogram + FastAPI)
+nest_asyncio.apply()
+
 from pyrogram import Client, filters, types
 from pyrogram.enums import ParseMode
 from data_manager import DataManager
-from fastapi import FastAPI, Query, Request, BackgroundTasks
+from fastapi import FastAPI, Query, Request
 from starlette.responses import JSONResponse
 
 # Setup Logging
@@ -21,14 +26,11 @@ DATA = DataManager()
 # FastAPI App
 api_app = FastAPI(title="Anime Witcher MTProto Service")
 
-# Pyrogram Bot Setup (MTProto allows up to 2GB uploads)
-# Using official Telegram Desktop credentials as reliable defaults
+# Pyrogram Bot Setup
 API_ID = os.environ.get("TELEGRAM_API_ID", "2040") 
 API_HASH = os.environ.get("TELEGRAM_API_HASH", "b18441a1ff607e10c989891a5462e627")
 BOT_TOKEN = os.environ.get("TELEGRAM_BOT_TOKEN", "7570728074:AAEOACQzg60gq7QxeGoubYT1URNxigfijjg")
 
-# Initialize Pyrogram Client
-# We use in_memory=True to avoid database lock issues on ephemeral file systems like Render
 bot = Client(
     "anime_witcher_bot",
     api_id=int(API_ID),
@@ -68,13 +70,11 @@ async def get_links(query: str = Query(..., description="Anime Name and Episode"
     except Exception as e:
         return JSONResponse(content={"status": "error", "message": str(e)}, status_code=500)
 
-# --- Video Processing Logic ---
+# --- Video Processing ---
 
 async def process_and_send_video(chat_id, video_url, caption, status_msg_id):
-    """Downloads and uploads video in a way that bypasses Bot API limits."""
     file_path = f"video_{int(time.time())}.mp4"
     try:
-        # 1. Download with progress
         last_update = 0
         async def progress(current, total, action):
             nonlocal last_update
@@ -88,6 +88,7 @@ async def process_and_send_video(chat_id, video_url, caption, status_msg_id):
                 except: pass
                 last_update = time.time()
 
+        # Download
         async with httpx.AsyncClient(follow_redirects=True, timeout=600) as client:
             async with client.stream("GET", video_url) as response:
                 response.raise_for_status()
@@ -99,7 +100,7 @@ async def process_and_send_video(chat_id, video_url, caption, status_msg_id):
                         downloaded += len(chunk)
                         await progress(downloaded, total_size, "تحميل")
 
-        # 2. Upload with native player support
+        # Upload
         await bot.edit_message_text(chat_id, status_msg_id, "✅ اكتمل التحميل. جاري الرفع لتليجرام...")
         await bot.send_video(
             chat_id=chat_id,
@@ -123,11 +124,7 @@ async def process_and_send_video(chat_id, video_url, caption, status_msg_id):
 
 @bot.on_message(filters.command("start"))
 async def start_cmd(client, message):
-    await message.reply_text(
-        "👋 أهلاً بك في **Anime Witcher Bot**!\n\n"
-        "أنا الآن أدعم إرسال الفيديوهات كبيرة الحجم مباشرة بفضل بروتوكول MTProto.\n"
-        "اكتب اسم الأنمي والحلقة (مثال: ون بيس 1000)"
-    )
+    await message.reply_text("👋 أهلاً بك! اكتب اسم الأنمي والحلقة (مثال: ون بيس 1)")
 
 @bot.on_message(filters.text & ~filters.command("start"))
 async def handle_text(client, message):
@@ -149,7 +146,6 @@ async def handle_text(client, message):
             servers = DATA.get_servers(target["doc_ref"], target_ep["id"])
             pd_link = next((s["url"] for s in servers if "PD" in s["name"] or "pixeldrain" in s["url"].lower()), None)
             if pd_link:
-                # Run the heavy processing in the background to avoid blocking the bot
                 asyncio.create_task(process_and_send_video(
                     message.chat.id, pd_link, 
                     f"🎬 **{target['name']}** - الحلقة {ep_num}", 
@@ -205,9 +201,8 @@ async def cb_handler(client, query):
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    # Ensure Pyrogram starts correctly within the FastAPI event loop
     await bot.start()
-    logger.info("MTProto Bot started successfully.")
+    logger.info("Bot started.")
     yield
     await bot.stop()
 
@@ -215,5 +210,4 @@ api_app.router.lifespan_context = lifespan
 
 if __name__ == "__main__":
     port = int(os.environ.get("PORT", 8000))
-    # We use uvicorn to run FastAPI, which will trigger the lifespan and start the bot
     uvicorn.run(api_app, host="0.0.0.0", port=port)

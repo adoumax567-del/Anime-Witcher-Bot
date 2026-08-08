@@ -1,9 +1,15 @@
 import os
 import uvicorn
-from bot import api_app
+import asyncio
+
+# Create and set a new event loop before importing pyrogram-based bot
+loop = asyncio.new_event_loop()
+asyncio.set_event_loop(loop)
 
 if __name__ == "__main__":
-    # Get port from environment variable for Render/Railway
+    # Delayed import to ensure loop is set
+    from bot import api_app
+    
     port = int(os.environ.get("PORT", 8000))
-    # Run the FastAPI app which also manages the Telegram bot lifecycle
+    # Run uvicorn
     uvicorn.run(api_app, host="0.0.0.0", port=port)
