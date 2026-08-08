@@ -28,7 +28,13 @@ async def get_links(query: str = Query(...)):
     target_ep = next((e for e in episodes if e["order"] == ep_num), episodes[0] if episodes else None)
     if not target_ep: return {"status": "error", "message": "Episode not found"}
     servers = DATA.get_servers(target["doc_ref"], target_ep["id"])
-    return {"status": "success", "anime": target["name"], "episode": ep_num or 1, "links": servers}
+    # For API/App, we return the download_url (app_url) as requested before
+    return {
+        "status": "success", 
+        "anime": target["name"], 
+        "episode": ep_num or 1, 
+        "links": [{"name": s["name"], "url": s["app_url"]} for s in servers]
+    }
 
 @api_app.post("/telegram-webhook")
 async def webhook(request: Request):
@@ -38,7 +44,7 @@ async def webhook(request: Request):
 
 # --- BOT ---
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    await update.message.reply_text("👋 أهلاً بك! اكتب اسم الأنمي والحلقة للمشاهدة في المتصفح.\nمثال: `سالي 1` أو `ون بيس 1000`")
+    await update.message.reply_text("👋 أهلاً بك! اكتب اسم الأنمي أو الفيلم والحلقة للمشاهدة فوراً في المتصفح.\nمثال: `سالي 1` أو `فيلم ون بيس`")
 
 async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.message.text
@@ -56,13 +62,14 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
         if target_ep:
             servers = DATA.get_servers(target["doc_ref"], target_ep["id"])
             if servers:
+                # Use the 'view' URL for browser playback to avoid Hotlink errors
                 btn = [[InlineKeyboardButton("🎬 مشاهدة في المتصفح الآن", url=servers[0]["url"])]]
                 await status.delete()
-                await update.message.reply_text(f"🎬 **{target['name']}** - الحلقة {ep_num}\n\nاضغط للمشاهدة فوراً:", reply_markup=InlineKeyboardMarkup(btn), parse_mode="Markdown")
+                await update.message.reply_text(f"🎬 **{target['name']}** - الحلقة {ep_num}\n\nاضغط للمشاهدة فوراً في المتصفح:", reply_markup=InlineKeyboardMarkup(btn), parse_mode="Markdown")
                 return
 
     buttons = [[InlineKeyboardButton(r["name"], callback_data=f"eps|{r['doc_ref']}")] for r in results]
-    await status.edit_text("✅ اختر الأنمي المطلوب:", reply_markup=InlineKeyboardMarkup(buttons))
+    await status.edit_text("✅ اختر المطلوب من النتائج:", reply_markup=InlineKeyboardMarkup(buttons))
 
 async def cb_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
@@ -82,6 +89,7 @@ async def cb_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         _, dr, ei, eo = data.split("|")
         servers = DATA.get_servers(dr, ei)
         if servers:
+            # Use 'view' URL for all server buttons
             btn = [[InlineKeyboardButton(f"🎬 {s['name']}", url=s['url'])] for s in servers[:5]]
             await query.message.reply_text(f"🎬 روابط مشاهدة الحلقة {eo}:", reply_markup=InlineKeyboardMarkup(btn))
 
