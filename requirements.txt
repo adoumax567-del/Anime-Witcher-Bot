@@ -1,9 +1,7 @@
 fastapi
 uvicorn[standard]
-pyrogram
-tgcrypto
+python-telegram-bot[ext]
 requests
 httpx
 rapidfuzz
 python-dotenv
-nest_asyncio
