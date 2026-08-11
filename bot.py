@@ -1,6 +1,7 @@
 import os
 import uvicorn
 import logging
+import asyncio
 from contextlib import asynccontextmanager
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup, ReplyKeyboardMarkup
 from telegram.ext import Application, CommandHandler, MessageHandler, filters, ContextTypes, CallbackQueryHandler
@@ -18,28 +19,48 @@ TOKEN = os.environ.get("TELEGRAM_BOT_TOKEN", "7570728074:AAEOACQzg60gq7QxeGoubYT
 application = Application.builder().token(TOKEN).build()
 
 # --- API ---
+
+@api_app.get("/")
+async def root():
+    return {
+        "status": "online",
+        "message": "Anime Witcher API is running successfully",
+        "endpoints": {
+            "api": "/get_links?query=anime_name",
+            "webhook": "/telegram-webhook"
+        }
+    }
+
 @api_app.get("/get_links")
 async def get_links(query: str = Query(...)):
-    name, ep_num = DATA.parse_smart_query(query)
-    results = DATA.search_anime(name)
-    if not results: return {"status": "error", "message": "Not found"}
-    target = results[0]
-    episodes = DATA.get_episodes(target["doc_ref"])
-    target_ep = next((e for e in episodes if e["order"] == ep_num), episodes[0] if episodes else None)
-    if not target_ep: return {"status": "error", "message": "Episode not found"}
-    servers = DATA.get_servers(target["doc_ref"], target_ep["id"])
-    return {
-        "status": "success", 
-        "anime": target["name"], 
-        "episode": ep_num or 1, 
-        "links": [{"name": s["name"], "url": s["app_url"]} for s in servers]
-    }
+    try:
+        name, ep_num = DATA.parse_smart_query(query)
+        results = DATA.search_anime(name)
+        if not results: return {"status": "error", "message": "Not found"}
+        target = results[0]
+        episodes = DATA.get_episodes(target["doc_ref"])
+        target_ep = next((e for e in episodes if e["order"] == ep_num), episodes[0] if episodes else None)
+        if not target_ep: return {"status": "error", "message": "Episode not found"}
+        servers = DATA.get_servers(target["doc_ref"], target_ep["id"])
+        return {
+            "status": "success", 
+            "anime": target["name"], 
+            "episode": ep_num or 1, 
+            "links": [{"name": s["name"], "url": s["app_url"]} for s in servers]
+        }
+    except Exception as e:
+        return {"status": "error", "message": str(e)}
 
 @api_app.post("/telegram-webhook")
 async def webhook(request: Request):
-    data = await request.json()
-    await application.process_update(Update.de_json(data, application.bot))
-    return {"status": "ok"}
+    try:
+        data = await request.json()
+        update = Update.de_json(data, application.bot)
+        await application.process_update(update)
+        return {"status": "ok"}
+    except Exception as e:
+        logger.error(f"Webhook error: {e}")
+        return {"status": "error"}
 
 # --- BOT HANDLERS ---
 
@@ -66,13 +87,10 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
         status = await update.message.reply_text(f"🔍 جاري البحث عن: **{name}**...", parse_mode="Markdown")
         results = DATA.search_anime(name)
         
-        if not status: return # Safety check
-
         if not results:
             await status.edit_text("❌ لم نجد نتائج. حاول كتابة الاسم بشكل أدق (عربي أو إنجليزي).")
             return
 
-        # If it's a very strong match (first result is highly similar)
         await status.delete()
         if len(results) == 1:
             await show_anime_options(update, results[0])
@@ -89,8 +107,6 @@ async def show_anime_options(update: Update, anime):
         [InlineKeyboardButton("📺 عرض الحلقات", callback_data=f"eps|{anime['doc_ref']}")],
         [InlineKeyboardButton("📖 وصف الأنمي", callback_data=f"dsc|{anime['doc_ref']}")]
     ]
-    
-    # Handle both message and callback query
     if update.callback_query:
         await update.callback_query.message.reply_text(text, reply_markup=InlineKeyboardMarkup(buttons), parse_mode="Markdown")
     else:
@@ -130,7 +146,7 @@ async def cb_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         
         buttons = []
         row = []
-        for ep in episodes[:80]: # Increased limit to 80 episodes
+        for ep in episodes[:80]:
             row.append(InlineKeyboardButton(f"H {ep['order']}", callback_data=f"srv|{doc_ref}|{ep['id']}|{ep['order']}"))
             if len(row) == 4:
                 buttons.append(row)
@@ -142,12 +158,10 @@ async def cb_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         _, dr, ei, eo = data.split("|")
         servers = DATA.get_servers(dr, ei)
         if servers:
-            # Direct view button (Official PixelDrain View Link)
             btn = [[InlineKeyboardButton("🎬 مشاهدة الآن في المتصفح", url=servers[0]["url"])]]
             if len(servers) > 1:
                 other_btns = [[InlineKeyboardButton(f"🔗 {s['name']}", url=s['url'])] for s in servers[1:5]]
                 btn.extend(other_btns)
-            
             await query.message.reply_text(f"🎬 حلقة {eo} جاهزة. اضغط للمشاهدة:", reply_markup=InlineKeyboardMarkup(btn))
         else:
             await query.message.reply_text("❌ عذراً، لم نجد روابط مشاهدة لهذه الحلقة.")
@@ -160,7 +174,9 @@ application.add_handler(CallbackQueryHandler(cb_handler))
 async def lifespan(app: FastAPI):
     await application.initialize()
     url = os.environ.get("WEBHOOK_URL")
-    if url: await application.bot.set_webhook(url=f"{url.rstrip('/')}/telegram-webhook")
+    if url:
+        await application.bot.set_webhook(url=f"{url.rstrip('/')}/telegram-webhook")
+        logger.info(f"Webhook set to: {url}/telegram-webhook")
     await application.start()
     yield
     await application.stop()
