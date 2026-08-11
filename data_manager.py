@@ -28,12 +28,8 @@ class DataManager:
 
     def search_algolia(self, index, query):
         url = f"https://{self.algolia_app_id}-dsn.algolia.net/1/indexes/{index}/query"
-        headers = {
-            "X-Algolia-Application-Id": self.algolia_app_id, 
-            "X-Algolia-API-Key": self.algolia_api_key
-        }
+        headers = {"X-Algolia-Application-Id": self.algolia_app_id, "X-Algolia-API-Key": self.algolia_api_key}
         try:
-            # Query multiple fields for better Arabic/English support
             res = requests.post(url, headers=headers, json={
                 "params": f"query={query}&hitsPerPage=20&attributesToRetrieve=name,title,arabic_name,doc_ref,path,poster"
             }, timeout=3)
@@ -41,10 +37,9 @@ class DataManager:
         except: return []
 
     def search_anime(self, query):
-        # Search across all primary indices for maximum coverage
-        indices = ["all_anime", "series", "movies", "anime_list", "latest_episodes"]
+        indices = ["all_anime", "series", "movies", "anime_list"]
         all_hits = []
-        with ThreadPoolExecutor(max_workers=5) as executor:
+        with ThreadPoolExecutor(max_workers=4) as executor:
             futures = [executor.submit(self.search_algolia, idx, query) for idx in indices]
             for f in futures: all_hits.extend(f.result())
         
@@ -52,7 +47,6 @@ class DataManager:
         for h in all_hits:
             oid = h.get("objectID")
             if oid not in unique:
-                # Extract the best possible name from available fields
                 name = h.get("name") or h.get("title") or h.get("arabic_name") or "Unknown"
                 unique[oid] = {
                     "name": name,
@@ -61,13 +55,17 @@ class DataManager:
                 }
         
         results = list(unique.values())
-        # Smart sorting: prioritize exact matches and high similarity in both languages
-        results.sort(key=lambda x: max(
-            fuzz.token_set_ratio(query.lower(), x["name"].lower()),
-            fuzz.partial_ratio(query.lower(), x["name"].lower())
-        ), reverse=True)
-        
-        return results[:15] # Return top 15 results for better choice
+        # Enhanced sorting: Boost exact word matches (critical for 'Naruto')
+        query_lower = query.lower()
+        def get_score(item_name):
+            item_name_lower = item_name.lower()
+            score = fuzz.token_set_ratio(query_lower, item_name_lower)
+            if query_lower in item_name_lower: score += 20
+            if item_name_lower.startswith(query_lower): score += 10
+            return score
+
+        results.sort(key=lambda x: get_score(x["name"]), reverse=True)
+        return results[:15]
 
     def get_anime_details(self, doc_ref):
         url = f"{self.firestore_base_url}/{doc_ref}"
@@ -77,9 +75,13 @@ class DataManager:
             f = res.json().get("fields", {})
             return {
                 "name": f.get("name", {}).get("stringValue") or f.get("title", {}).get("stringValue", "Unknown"),
-                "story": f.get("story", {}).get("stringValue", "لا يوجد وصف متوفر حالياً."),
+                "story": f.get("story", {}).get("stringValue", "لا يوجد وصف متوفر."),
                 "rating": f.get("rating", {}).get("stringValue", "N/A"),
-                "poster": f.get("poster", {}).get("stringValue")
+                "poster": f.get("poster", {}).get("stringValue"),
+                "status": f.get("status", {}).get("stringValue", "غير معروف"),
+                "num_episodes": f.get("num_episodes", {}).get("stringValue") or f.get("episodes_count", {}).get("stringValue", "غير محدد"),
+                "year": f.get("year", {}).get("stringValue", "غير معروف"),
+                "type": f.get("type", {}).get("stringValue", "أنمي")
             }
         except: return None
 
@@ -94,7 +96,6 @@ class DataManager:
                 f = d.get("fields", {})
                 name = f.get("name", {}).get("stringValue", "Unknown")
                 eid = d.get("name").split("/")[-1]
-                # Extract numbers from name (e.g., "الحلقة 1" -> 1)
                 try: order = int("".join(filter(str.isdigit, name)))
                 except: order = 999
                 eps.append({"id": eid, "name": name, "order": order})
@@ -107,7 +108,6 @@ class DataManager:
             match = re.search(r"(?:/u/|/api/file/|/l/)([a-zA-Z0-9]+)", url)
             if match:
                 file_id = match.group(1)
-                # Browser view link vs Direct download/M3u8 link
                 return f"https://pixeldrain.com/u/{file_id}" if mode == "view" else f"https://pixeldrain.com/api/file/{file_id}?download"
         return url
 
@@ -123,7 +123,6 @@ class DataManager:
                 name = f.get("name", {}).get("stringValue", "Server")
                 link = f.get("link", {}).get("stringValue", "")
                 if not link:
-                    # Fallback for hidden links
                     for k, b in [("streamtape_video_id", "https://streamtape.com/e/"), ("mixdrop_video_id", "https://mixdrop.co/e/")]:
                         if k in f: link = b + f[k].get("stringValue", ""); break
                 if link:
@@ -133,13 +132,11 @@ class DataManager:
                         "app_url": self.resolve_pd(link, mode="download"),
                         "is_pd": "pixeldrain" in link.lower()
                     })
-            # Prioritize PD servers
             servers.sort(key=lambda x: x["is_pd"], reverse=True)
             return servers
         except: return []
 
     def parse_smart_query(self, q):
-        # Handle formats like "Naruto 1" or "ون بيس الحلقة 100"
         m = re.search(r"(.+)\s+(?:الحلقة|حلقة|episode|ep|part)\s+(\d+)", q, re.I)
         if not m: m = re.search(r"(.+)\s+(\d+)$", q)
         if m: return m.group(1).strip(), int(m.group(2))

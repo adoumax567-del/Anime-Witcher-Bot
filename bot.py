@@ -19,17 +19,9 @@ TOKEN = os.environ.get("TELEGRAM_BOT_TOKEN", "7570728074:AAEOACQzg60gq7QxeGoubYT
 application = Application.builder().token(TOKEN).build()
 
 # --- API ---
-
 @api_app.get("/")
 async def root():
-    return {
-        "status": "online",
-        "message": "Anime Witcher API is running successfully",
-        "endpoints": {
-            "api": "/get_links?query=anime_name",
-            "webhook": "/telegram-webhook"
-        }
-    }
+    return {"status": "online", "message": "Anime Witcher API is running"}
 
 @api_app.get("/get_links")
 async def get_links(query: str = Query(...)):
@@ -53,21 +45,16 @@ async def get_links(query: str = Query(...)):
 
 @api_app.post("/telegram-webhook")
 async def webhook(request: Request):
-    try:
-        data = await request.json()
-        update = Update.de_json(data, application.bot)
-        await application.process_update(update)
-        return {"status": "ok"}
-    except Exception as e:
-        logger.error(f"Webhook error: {e}")
-        return {"status": "error"}
+    data = await request.json()
+    await application.process_update(Update.de_json(data, application.bot))
+    return {"status": "ok"}
 
 # --- BOT HANDLERS ---
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     keyboard = [["🎬 مشاهدة", "🔍 بحث"]]
     await update.message.reply_text(
-        "👋 أهلاً بك في بوت **Anime Witcher** الشامل!\n"
+        "👋 أهلاً بك في بوت **Anime Witcher** المطور!\n"
         "أنا أبحث عن أي أنمي، فيلم، أو مسلسل بالعربي أو الإنجليزي.\n\n"
         "اختر ماذا تريد أن تفعل:",
         reply_markup=ReplyKeyboardMarkup(keyboard, resize_keyboard=True),
@@ -88,10 +75,10 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
         results = DATA.search_anime(name)
         
         if not results:
-            await status.edit_text("❌ لم نجد نتائج. حاول كتابة الاسم بشكل أدق (عربي أو إنجليزي).")
+            await status.edit_text("❌ لم نجد نتائج. حاول كتابة الاسم بشكل أدق.")
             return
 
-        await status.delete()
+        # No deletion of the search message as requested
         if len(results) == 1:
             await show_anime_options(update, results[0])
         else:
@@ -102,11 +89,34 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
 
 async def show_anime_options(update: Update, anime):
-    text = f"🎬 **{anime['name']}**\n\nماذا تريد أن تفعل؟"
+    details = DATA.get_anime_details(anime['doc_ref'])
+    if not details:
+        details = {"name": anime['name'], "story": "لا يوجد وصف.", "rating": "N/A", "status": "N/A", "num_episodes": "N/A", "year": "N/A", "type": "أنمي"}
+
+    text = (
+        f"🎬 **{details['name']}**\n\n"
+        f"⭐ **التقييم:** {details['rating']}\n"
+        f"📅 **السنة:** {details['year']}\n"
+        f"📺 **النوع:** {details['type']}\n"
+        f"🔄 **الحالة:** {details['status']}\n"
+        f"🔢 **عدد الحلقات:** {details['num_episodes']}\n\n"
+        f"📖 **القصة:**\n{details['story'][:500]}..."
+    )
+    
     buttons = [
         [InlineKeyboardButton("📺 عرض الحلقات", callback_data=f"eps|{anime['doc_ref']}")],
-        [InlineKeyboardButton("📖 وصف الأنمي", callback_data=f"dsc|{anime['doc_ref']}")]
+        [InlineKeyboardButton("🔍 بحث جديد", callback_data="new_search")]
     ]
+    
+    if details.get("poster"):
+        try:
+            if update.callback_query:
+                await update.callback_query.message.reply_photo(photo=details["poster"], caption=text, reply_markup=InlineKeyboardMarkup(buttons), parse_mode="Markdown")
+            else:
+                await update.message.reply_photo(photo=details["poster"], caption=text, reply_markup=InlineKeyboardMarkup(buttons), parse_mode="Markdown")
+            return
+        except: pass
+
     if update.callback_query:
         await update.callback_query.message.reply_text(text, reply_markup=InlineKeyboardMarkup(buttons), parse_mode="Markdown")
     else:
@@ -117,36 +127,24 @@ async def cb_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await query.answer()
     data = query.data
     
-    if data.startswith("opt|"):
-        doc_ref = data.split("|")[1]
-        details = DATA.get_anime_details(doc_ref)
-        if details:
-            await show_anime_options(update, {"name": details["name"], "doc_ref": doc_ref})
+    if data == "new_search":
+        await query.message.reply_text("📝 اكتب اسم العمل الذي تبحث عنه:")
+        context.user_data['waiting_for_name'] = True
 
-    elif data.startswith("dsc|"):
+    elif data.startswith("opt|"):
         doc_ref = data.split("|")[1]
-        details = DATA.get_anime_details(doc_ref)
-        if details:
-            text = f"📖 **وصف {details['name']}**\n\n{details['story']}"
-            btn = [[InlineKeyboardButton("📺 عرض الحلقات", callback_data=f"eps|{doc_ref}")]]
-            if details.get("poster"):
-                try:
-                    await query.message.reply_photo(photo=details["poster"], caption=text[:1000], reply_markup=InlineKeyboardMarkup(btn), parse_mode="Markdown")
-                except:
-                    await query.message.reply_text(text[:4000], reply_markup=InlineKeyboardMarkup(btn), parse_mode="Markdown")
-            else:
-                await query.message.reply_text(text[:4000], reply_markup=InlineKeyboardMarkup(btn), parse_mode="Markdown")
+        await show_anime_options(update, {"doc_ref": doc_ref})
 
     elif data.startswith("eps|"):
         doc_ref = data.split("|")[1]
         episodes = DATA.get_episodes(doc_ref)
         if not episodes:
-            await query.message.reply_text("❌ عذراً، لا توجد حلقات متاحة لهذا العمل حالياً.")
+            await query.message.reply_text("❌ عذراً، لا توجد حلقات متاحة حالياً.")
             return
         
         buttons = []
         row = []
-        for ep in episodes[:80]:
+        for ep in episodes[:100]:
             row.append(InlineKeyboardButton(f"H {ep['order']}", callback_data=f"srv|{doc_ref}|{ep['id']}|{ep['order']}"))
             if len(row) == 4:
                 buttons.append(row)
@@ -162,9 +160,9 @@ async def cb_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             if len(servers) > 1:
                 other_btns = [[InlineKeyboardButton(f"🔗 {s['name']}", url=s['url'])] for s in servers[1:5]]
                 btn.extend(other_btns)
-            await query.message.reply_text(f"🎬 حلقة {eo} جاهزة. اضغط للمشاهدة:", reply_markup=InlineKeyboardMarkup(btn))
+            await query.message.reply_text(f"🎬 حلقة {eo} جاهزة للمشاهدة:", reply_markup=InlineKeyboardMarkup(btn))
         else:
-            await query.message.reply_text("❌ عذراً، لم نجد روابط مشاهدة لهذه الحلقة.")
+            await query.message.reply_text("❌ عذراً، لم نجد روابط لهذه الحلقة.")
 
 application.add_handler(CommandHandler("start", start))
 application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_text))
@@ -174,9 +172,7 @@ application.add_handler(CallbackQueryHandler(cb_handler))
 async def lifespan(app: FastAPI):
     await application.initialize()
     url = os.environ.get("WEBHOOK_URL")
-    if url:
-        await application.bot.set_webhook(url=f"{url.rstrip('/')}/telegram-webhook")
-        logger.info(f"Webhook set to: {url}/telegram-webhook")
+    if url: await application.bot.set_webhook(url=f"{url.rstrip('/')}/telegram-webhook")
     await application.start()
     yield
     await application.stop()
