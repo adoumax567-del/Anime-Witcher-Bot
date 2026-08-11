@@ -31,7 +31,7 @@ class DataManager:
         headers = {"X-Algolia-Application-Id": self.algolia_app_id, "X-Algolia-API-Key": self.algolia_api_key}
         try:
             res = requests.post(url, headers=headers, json={
-                "params": f"query={query}&hitsPerPage=20&attributesToRetrieve=name,title,arabic_name,doc_ref,path,poster"
+                "params": f"query={query}&hitsPerPage=20&attributesToRetrieve=name,title,arabic_name,doc_ref,path,poster,year,rating,status"
             }, timeout=3)
             return res.json().get("hits", [])
         except: return []
@@ -51,17 +51,19 @@ class DataManager:
                 unique[oid] = {
                     "name": name,
                     "doc_ref": h.get("doc_ref") or h.get("path") or f"anime_list/{oid}",
-                    "poster": h.get("poster")
+                    "poster": h.get("poster"),
+                    "year": h.get("year", "غير معروف"),
+                    "rating": h.get("rating", "N/A"),
+                    "status": h.get("status", "غير معروف")
                 }
         
         results = list(unique.values())
-        # Enhanced sorting: Boost exact word matches (critical for 'Naruto')
         query_lower = query.lower()
         def get_score(item_name):
             item_name_lower = item_name.lower()
             score = fuzz.token_set_ratio(query_lower, item_name_lower)
-            if query_lower in item_name_lower: score += 20
-            if item_name_lower.startswith(query_lower): score += 10
+            if query_lower in item_name_lower: score += 30
+            if item_name_lower.startswith(query_lower): score += 20
             return score
 
         results.sort(key=lambda x: get_score(x["name"]), reverse=True)
@@ -73,17 +75,31 @@ class DataManager:
         try:
             res = requests.get(url, headers=headers, params={"key": self.firebase_api_key}, timeout=5)
             f = res.json().get("fields", {})
+            
+            # Helper to extract string values safely
+            def g(key, default="غير متوفر"):
+                val = f.get(key, {})
+                if "stringValue" in val: return val["stringValue"]
+                if "integerValue" in val: return str(val["integerValue"])
+                if "doubleValue" in val: return str(val["doubleValue"])
+                return default
+
             return {
-                "name": f.get("name", {}).get("stringValue") or f.get("title", {}).get("stringValue", "Unknown"),
-                "story": f.get("story", {}).get("stringValue", "لا يوجد وصف متوفر."),
-                "rating": f.get("rating", {}).get("stringValue", "N/A"),
-                "poster": f.get("poster", {}).get("stringValue"),
-                "status": f.get("status", {}).get("stringValue", "غير معروف"),
-                "num_episodes": f.get("num_episodes", {}).get("stringValue") or f.get("episodes_count", {}).get("stringValue", "غير محدد"),
-                "year": f.get("year", {}).get("stringValue", "غير معروف"),
-                "type": f.get("type", {}).get("stringValue", "أنمي")
+                "name": g("name") if g("name") != "غير متوفر" else g("title", "Unknown"),
+                "story": g("story"),
+                "rating": g("rating", "N/A"),
+                "poster": g("poster", None),
+                "status": g("status"),
+                "num_episodes": g("num_episodes") if g("num_episodes") != "غير متوفر" else g("episodes_count"),
+                "year": g("year") if g("year") != "غير متوفر" else g("release_date", "غير معروف"),
+                "type": g("type", "أنمي"),
+                "genres": g("genres", "غير محدد"),
+                "season": g("season", "غير محدد"),
+                "studio": g("studio", "غير معروف")
             }
-        except: return None
+        except Exception as e:
+            logger.error(f"Error fetching details: {e}")
+            return None
 
     def get_episodes(self, doc_ref):
         url = f"{self.firestore_base_url}/{doc_ref}/episodes"
