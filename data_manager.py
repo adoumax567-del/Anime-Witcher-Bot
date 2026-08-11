@@ -21,7 +21,7 @@ class DataManager:
 
     def refresh_token(self):
         try:
-            res = requests.post(self.auth_url, json={"returnSecureToken": True}, timeout=5)
+            res = requests.post(self.auth_url, json={"returnSecureToken": True}, timeout=10)
             if res.status_code == 200:
                 self.id_token = res.json().get("idToken")
         except: pass
@@ -30,11 +30,14 @@ class DataManager:
         url = f"https://{self.algolia_app_id}-dsn.algolia.net/1/indexes/{index}/query"
         headers = {"X-Algolia-Application-Id": self.algolia_app_id, "X-Algolia-API-Key": self.algolia_api_key}
         try:
+            # Increased timeout to 7 seconds for stability
             res = requests.post(url, headers=headers, json={
                 "params": f"query={query}&hitsPerPage=20&attributesToRetrieve=name,title,arabic_name,doc_ref,path,poster,year,rating,status"
-            }, timeout=3)
+            }, timeout=7)
             return res.json().get("hits", [])
-        except: return []
+        except Exception as e:
+            logger.error(f"Algolia search error: {e}")
+            return []
 
     def search_anime(self, query):
         indices = ["all_anime", "series", "movies", "anime_list"]
@@ -51,10 +54,7 @@ class DataManager:
                 unique[oid] = {
                     "name": name,
                     "doc_ref": h.get("doc_ref") or h.get("path") or f"anime_list/{oid}",
-                    "poster": h.get("poster"),
-                    "year": h.get("year", "غير معروف"),
-                    "rating": h.get("rating", "N/A"),
-                    "status": h.get("status", "غير معروف")
+                    "poster": h.get("poster")
                 }
         
         results = list(unique.values())
@@ -73,10 +73,11 @@ class DataManager:
         url = f"{self.firestore_base_url}/{doc_ref}"
         headers = {"Authorization": f"Bearer {self.id_token}"} if self.id_token else {}
         try:
-            res = requests.get(url, headers=headers, params={"key": self.firebase_api_key}, timeout=5)
+            # Increased timeout to 10 seconds
+            res = requests.get(url, headers=headers, params={"key": self.firebase_api_key}, timeout=10)
+            if res.status_code != 200: return None
             f = res.json().get("fields", {})
             
-            # Helper to extract string values safely
             def g(key, default="غير متوفر"):
                 val = f.get(key, {})
                 if "stringValue" in val: return val["stringValue"]
@@ -105,7 +106,9 @@ class DataManager:
         url = f"{self.firestore_base_url}/{doc_ref}/episodes"
         headers = {"Authorization": f"Bearer {self.id_token}"} if self.id_token else {}
         try:
-            res = requests.get(url, headers=headers, params={"key": self.firebase_api_key}, timeout=5)
+            # Increased timeout to 10 seconds
+            res = requests.get(url, headers=headers, params={"key": self.firebase_api_key}, timeout=10)
+            if res.status_code != 200: return []
             docs = res.json().get("documents", [])
             eps = []
             for d in docs:
@@ -117,7 +120,9 @@ class DataManager:
                 eps.append({"id": eid, "name": name, "order": order})
             eps.sort(key=lambda x: x["order"])
             return eps
-        except: return []
+        except Exception as e:
+            logger.error(f"Error fetching episodes: {e}")
+            return []
 
     def resolve_pd(self, url, mode="view"):
         if "pixeldrain.com" in url:
@@ -131,7 +136,9 @@ class DataManager:
         url = f"{self.firestore_base_url}/{doc_ref}/episodes/{ep_id}/servers"
         headers = {"Authorization": f"Bearer {self.id_token}"} if self.id_token else {}
         try:
-            res = requests.get(url, headers=headers, params={"key": self.firebase_api_key}, timeout=5)
+            # Increased timeout to 10 seconds
+            res = requests.get(url, headers=headers, params={"key": self.firebase_api_key}, timeout=10)
+            if res.status_code != 200: return []
             docs = res.json().get("documents", [])
             servers = []
             for d in docs:
@@ -150,7 +157,9 @@ class DataManager:
                     })
             servers.sort(key=lambda x: x["is_pd"], reverse=True)
             return servers
-        except: return []
+        except Exception as e:
+            logger.error(f"Error fetching servers: {e}")
+            return []
 
     def parse_smart_query(self, q):
         m = re.search(r"(.+)\s+(?:الحلقة|حلقة|episode|ep|part)\s+(\d+)", q, re.I)

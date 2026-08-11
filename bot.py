@@ -71,11 +71,10 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
 async def show_help(update: Update):
     help_text = (
         "❓ **كيفية استخدام البوت:**\n\n"
-        "1️⃣ **البحث:** اضغط على زر '🔍 بحث' أو '🎬 مشاهدة' ثم اكتب اسم الأنمي أو الفيلم (بالعربي أو الإنجليزي).\n"
+        "1️⃣ **البحث:** اضغط على زر '🔍 بحث' أو '🎬 مشاهدة' ثم اكتب اسم الأنمي أو الفيلم.\n"
         "2️⃣ **اختيار العمل:** ستظهر لك قائمة بالنتائج، اختر العمل الذي تريده.\n"
-        "3️⃣ **المعلومات:** يمكنك قصة الأنمي وتفاصيله بالضغط على '📖 وصف الأنمي'.\n"
-        "4️⃣ **المشاهدة:** اضغط على '📺 عرض الحلقات' ثم اختر رقم الحلقة، وسيظهر لك زر للمشاهدة في المتصفح فوراً.\n\n"
-        "💡 **نصيحة:** إذا كان الأنمي طويلاً، استخدم أزرار 'المزيد' للتنقل بين مئات الحلقات.\n\n"
+        "3️⃣ **المشاهدة:** اضغط على '📺 عرض الحلقات' ثم اختر رقم الحلقة.\n\n"
+        "💡 **نصيحة:** إذا واجهت بطء في البحث، يرجى الانتظار قليلاً فالبوت يقوم بفحص عدة مصادر لضمان أفضل نتيجة.\n\n"
         "🏠 يمكنك العودة للرئيسية في أي وقت باستخدام زر '🏠 الرئيسية'."
     )
     buttons = [[InlineKeyboardButton("🏠 العودة للرئيسية", callback_data="go_home")]]
@@ -95,19 +94,36 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     if context.user_data.get('waiting_for_name'):
         name, ep_num = DATA.parse_smart_query(text)
-        status = await update.message.reply_text(f"📡 **جاري الفحص والبحث عن:** `{name}`...", parse_mode="Markdown")
-        results = DATA.search_anime(name)
+        status = await update.message.reply_text(f"📡 **جاري فحص المصادر والبحث عن:** `{name}`...\nيرجى الانتظار قليلاً ⏳", parse_mode="Markdown")
         
-        if not results:
-            await status.edit_text("❌ **عذراً، لم أتمكن من العثور على نتائج.**\nتأكد من كتابة الاسم بشكل صحيح أو جرب لغة أخرى.")
-            return
+        try:
+            results = DATA.search_anime(name)
+            
+            if not results:
+                await status.edit_text(
+                    "🔍 **نعتذر، لم نتمكن من العثور على العمل المطلوب.**\n\n"
+                    "💡 **نصائح للبحث:**\n"
+                    "• تأكد من كتابة الاسم بشكل صحيح.\n"
+                    "• جرب كتابة الاسم باللغة الإنجليزية.\n"
+                    "• جرب كتابة جزء من الاسم فقط.",
+                    reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🏠 الرئيسية", callback_data="go_home")]])
+                )
+                return
 
-        if len(results) == 1:
-            await show_anime_options(update, results[0])
-        else:
-            buttons = [[InlineKeyboardButton(f"📁 {r['name']}", callback_data=f"opt|{r['doc_ref']}")] for r in results]
-            buttons.append([InlineKeyboardButton("🏠 الرئيسية", callback_data="go_home")])
-            await update.message.reply_text("✨ **إليك أفضل النتائج المتوفرة:**", reply_markup=InlineKeyboardMarkup(buttons))
+            if len(results) == 1:
+                await show_anime_options(update, results[0])
+            else:
+                buttons = [[InlineKeyboardButton(f"📁 {r['name']}", callback_data=f"opt|{r['doc_ref']}")] for r in results]
+                buttons.append([InlineKeyboardButton("🏠 الرئيسية", callback_data="go_home")])
+                await update.message.reply_text("✨ **إليك أفضل النتائج التي تم العثور عليها:**", reply_markup=InlineKeyboardMarkup(buttons))
+            
+        except Exception as e:
+            logger.error(f"Search error: {e}")
+            await status.edit_text(
+                "⚠️ **عذراً، حدث تأخير غير متوقع في جلب النتائج.**\n"
+                "يرجى المحاولة مرة أخرى بعد لحظات، أو تجربة اسم آخر.",
+                reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🏠 الرئيسية", callback_data="go_home")]])
+            )
         
         context.user_data['waiting_for_name'] = False
         return
@@ -115,7 +131,11 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
 async def show_anime_options(update: Update, anime):
     details = DATA.get_anime_details(anime['doc_ref'])
     if not details:
-        details = {"name": anime['name'], "story": "لا يوجد وصف متوفر.", "rating": "N/A", "status": "غير معروف", "num_episodes": "غير محدد", "year": "غير معروف", "type": "أنمي", "genres": "غير محدد", "season": "غير محدد", "studio": "غير معروف"}
+        await update.message.reply_text(
+            "⚠️ **عذراً، واجهنا مشكلة في جلب تفاصيل هذا العمل.**\nيرجى المحاولة مرة أخرى لاحقاً.",
+            reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🏠 الرئيسية", callback_data="go_home")]])
+        )
+        return
 
     text = (
         f"🔥 **{details['name']}**\n"
@@ -185,7 +205,10 @@ async def cb_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         
         episodes = DATA.get_episodes(doc_ref)
         if not episodes:
-            await query.message.reply_text("❌ **عذراً، لا توجد حلقات متاحة حالياً.**")
+            await query.message.reply_text(
+                "📁 **تم العثور على العمل، ولكن لا توجد حلقات متاحة حالياً.**\nسيتم إضافتها في أقرب وقت ممكن!",
+                reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🏠 الرئيسية", callback_data="go_home")]])
+            )
             return
         
         current_batch = episodes[offset : offset + limit]
@@ -234,7 +257,10 @@ async def cb_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 parse_mode="Markdown"
             )
         else:
-            await query.message.reply_text("❌ **عذراً، لم نتمكن من جلب روابط لهذه الحلقة.**")
+            await query.message.reply_text(
+                "🔗 **نعتذر، روابط المشاهدة لهذه الحلقة غير متوفرة حالياً.**\nيرجى تجربة سيرفر آخر أو حلقة أخرى.",
+                reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🏠 الرئيسية", callback_data="go_home")]])
+            )
 
 application.add_handler(CommandHandler("start", start))
 application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_text))
