@@ -113,7 +113,7 @@ async def show_anime_options(update: Update, anime):
     )
     
     buttons = [
-        [InlineKeyboardButton("📺 عرض الحلقات", callback_data=f"eps|{anime['doc_ref']}")],
+        [InlineKeyboardButton("📺 عرض الحلقات", callback_data=f"eps|{anime['doc_ref']}|0")],
         [InlineKeyboardButton("🔍 بحث جديد", callback_data="new_search")]
     ]
     
@@ -149,22 +149,48 @@ async def cb_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await show_anime_options(update, {"doc_ref": doc_ref})
 
     elif data.startswith("eps|"):
-        doc_ref = data.split("|")[1]
+        parts = data.split("|")
+        doc_ref = parts[1]
+        offset = int(parts[2]) if len(parts) > 2 else 0
+        limit = 100
+        
         episodes = DATA.get_episodes(doc_ref)
         if not episodes:
             await query.message.reply_text("❌ **عذراً، لا توجد حلقات متاحة حالياً.**")
             return
         
+        # Slice episodes based on offset and limit
+        current_batch = episodes[offset : offset + limit]
+        
         buttons = []
         row = []
-        for ep in episodes[:100]:
+        for ep in current_batch:
             row.append(InlineKeyboardButton(f"E{ep['order']}", callback_data=f"srv|{doc_ref}|{ep['id']}|{ep['order']}"))
-            if len(row) == 5: # 5 columns for better organization
+            if len(row) == 5:
                 buttons.append(row)
                 row = []
         if row: buttons.append(row)
         
-        await query.message.reply_text("🎬 **اختر الحلقة التي ترغب بمشاهدتها:**", reply_markup=InlineKeyboardMarkup(buttons))
+        # Add pagination buttons
+        nav_buttons = []
+        if offset > 0:
+            nav_buttons.append(InlineKeyboardButton("⬅️ السابق", callback_data=f"eps|{doc_ref}|{max(0, offset - limit)}"))
+        if offset + limit < len(episodes):
+            nav_buttons.append(InlineKeyboardButton("المزيد من الحلقات ➡️", callback_data=f"eps|{doc_ref}|{offset + limit}"))
+        
+        if nav_buttons:
+            buttons.append(nav_buttons)
+        
+        text = f"🎬 **قائمة الحلقات ({offset + 1} - {min(offset + limit, len(episodes))} من {len(episodes)}):**"
+        
+        if offset == 0 and not update.callback_query.message.photo:
+            await query.message.reply_text(text, reply_markup=InlineKeyboardMarkup(buttons), parse_mode="Markdown")
+        else:
+            # Edit existing message to avoid spam if it's a text message, or send new if photo
+            try:
+                await query.edit_message_text(text, reply_markup=InlineKeyboardMarkup(buttons), parse_mode="Markdown")
+            except:
+                await query.message.reply_text(text, reply_markup=InlineKeyboardMarkup(buttons), parse_mode="Markdown")
 
     elif data.startswith("srv|"):
         _, dr, ei, eo = data.split("|")
