@@ -30,12 +30,11 @@ class DataManager:
         url = f"https://{self.algolia_app_id}-dsn.algolia.net/1/indexes/{index}/query"
         headers = {"X-Algolia-Application-Id": self.algolia_app_id, "X-Algolia-API-Key": self.algolia_api_key}
         try:
-            res = requests.post(url, headers=headers, json={"params": f"query={query}&hitsPerPage=20"}, timeout=3)
+            res = requests.post(url, headers=headers, json={"params": f"query={query}&hitsPerPage=10"}, timeout=3)
             return res.json().get("hits", [])
         except: return []
 
     def search_anime(self, query):
-        # Broad search across all possible indices to find movies, series, and anime
         indices = ["all_anime", "series", "movies", "anime_list"]
         all_hits = []
         with ThreadPoolExecutor(max_workers=4) as executor:
@@ -53,8 +52,23 @@ class DataManager:
                 }
         
         results = list(unique.values())
-        results.sort(key=lambda x: fuzz.ratio(query.lower(), x["name"].lower()), reverse=True)
+        # Enhanced fuzzy matching for better results
+        results.sort(key=lambda x: fuzz.token_set_ratio(query.lower(), x["name"].lower()), reverse=True)
         return results[:10]
+
+    def get_anime_details(self, doc_ref):
+        url = f"{self.firestore_base_url}/{doc_ref}"
+        headers = {"Authorization": f"Bearer {self.id_token}"} if self.id_token else {}
+        try:
+            res = requests.get(url, headers=headers, params={"key": self.firebase_api_key}, timeout=5)
+            f = res.json().get("fields", {})
+            return {
+                "name": f.get("name", {}).get("stringValue") or f.get("title", {}).get("stringValue", "Unknown"),
+                "story": f.get("story", {}).get("stringValue", "لا يوجد وصف."),
+                "rating": f.get("rating", {}).get("stringValue", "N/A"),
+                "poster": f.get("poster", {}).get("stringValue")
+            }
+        except: return None
 
     def get_episodes(self, doc_ref):
         url = f"{self.firestore_base_url}/{doc_ref}/episodes"
@@ -75,18 +89,11 @@ class DataManager:
         except: return []
 
     def resolve_pd(self, url, mode="view"):
-        """
-        mode='view': For browser playback (prevents Hotlink error)
-        mode='download': For app M3u8 playback
-        """
         if "pixeldrain.com" in url:
             match = re.search(r"(?:/u/|/api/file/|/l/)([a-zA-Z0-9]+)", url)
             if match:
                 file_id = match.group(1)
-                if mode == "view":
-                    return f"https://pixeldrain.com/u/{file_id}"
-                else:
-                    return f"https://pixeldrain.com/api/file/{file_id}?download"
+                return f"https://pixeldrain.com/u/{file_id}" if mode == "view" else f"https://pixeldrain.com/api/file/{file_id}?download"
         return url
 
     def get_servers(self, doc_ref, ep_id):
@@ -104,14 +111,11 @@ class DataManager:
                     for k, b in [("streamtape_video_id", "https://streamtape.com/e/"), ("mixdrop_video_id", "https://mixdrop.co/e/")]:
                         if k in f: link = b + f[k].get("stringValue", ""); break
                 if link:
-                    # We store both to be flexible
-                    view_url = self.resolve_pd(link, mode="view")
-                    download_url = self.resolve_pd(link, mode="download")
                     servers.append({
                         "name": name, 
-                        "url": view_url, 
-                        "app_url": download_url,
-                        "is_pd": "pixeldrain" in view_url
+                        "url": self.resolve_pd(link, mode="view"), 
+                        "app_url": self.resolve_pd(link, mode="download"),
+                        "is_pd": "pixeldrain" in link.lower()
                     })
             servers.sort(key=lambda x: x["is_pd"], reverse=True)
             return servers
