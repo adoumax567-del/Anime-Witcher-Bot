@@ -46,35 +46,39 @@ async def webhook(request: Request):
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     keyboard = [["🎬 مشاهدة", "🔍 بحث"]]
     await update.message.reply_text(
-        "👋 أهلاً بك في بوت Anime Witcher!\nاختر ماذا تريد أن تفعل:",
-        reply_markup=ReplyKeyboardMarkup(keyboard, resize_keyboard=True)
+        "👋 أهلاً بك في بوت **Anime Witcher** الشامل!\n"
+        "أنا أبحث عن أي أنمي، فيلم، أو مسلسل بالعربي أو الإنجليزي.\n\n"
+        "اختر ماذا تريد أن تفعل:",
+        reply_markup=ReplyKeyboardMarkup(keyboard, resize_keyboard=True),
+        parse_mode="Markdown"
     )
 
 async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
     text = update.message.text
     
     if text == "🎬 مشاهدة" or text == "🔍 بحث":
-        await update.message.reply_text("📝 من فضلك اكتب اسم الفيلم، الأنمي، أو المسلسل:")
+        await update.message.reply_text("📝 من فضلك اكتب اسم (الأنمي، الفيلم، أو المسلسل) بالعربي أو الإنجليزي:")
         context.user_data['waiting_for_name'] = True
         return
 
     if context.user_data.get('waiting_for_name'):
         name, ep_num = DATA.parse_smart_query(text)
-        status = await update.message.reply_text(f"🔍 جاري البحث عن: {name}...")
+        status = await update.message.reply_text(f"🔍 جاري البحث عن: **{name}**...", parse_mode="Markdown")
         results = DATA.search_anime(name)
         
+        if not status: return # Safety check
+
         if not results:
-            await status.edit_text("❌ لم نجد نتائج. حاول كتابة الاسم بشكل صحيح.")
+            await status.edit_text("❌ لم نجد نتائج. حاول كتابة الاسم بشكل أدق (عربي أو إنجليزي).")
             return
 
-        # If exactly one result or high confidence
+        # If it's a very strong match (first result is highly similar)
+        await status.delete()
         if len(results) == 1:
-            target = results[0]
-            await status.delete()
-            await show_anime_options(update, target)
+            await show_anime_options(update, results[0])
         else:
             buttons = [[InlineKeyboardButton(r["name"], callback_data=f"opt|{r['doc_ref']}")] for r in results]
-            await status.edit_text("✅ اختر من النتائج التالية:", reply_markup=InlineKeyboardMarkup(buttons))
+            await update.message.reply_text("✅ إليك أفضل النتائج التي وجدتها:", reply_markup=InlineKeyboardMarkup(buttons))
         
         context.user_data['waiting_for_name'] = False
         return
@@ -85,6 +89,8 @@ async def show_anime_options(update: Update, anime):
         [InlineKeyboardButton("📺 عرض الحلقات", callback_data=f"eps|{anime['doc_ref']}")],
         [InlineKeyboardButton("📖 وصف الأنمي", callback_data=f"dsc|{anime['doc_ref']}")]
     ]
+    
+    # Handle both message and callback query
     if update.callback_query:
         await update.callback_query.message.reply_text(text, reply_markup=InlineKeyboardMarkup(buttons), parse_mode="Markdown")
     else:
@@ -108,7 +114,10 @@ async def cb_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             text = f"📖 **وصف {details['name']}**\n\n{details['story']}"
             btn = [[InlineKeyboardButton("📺 عرض الحلقات", callback_data=f"eps|{doc_ref}")]]
             if details.get("poster"):
-                await query.message.reply_photo(photo=details["poster"], caption=text[:1000], reply_markup=InlineKeyboardMarkup(btn), parse_mode="Markdown")
+                try:
+                    await query.message.reply_photo(photo=details["poster"], caption=text[:1000], reply_markup=InlineKeyboardMarkup(btn), parse_mode="Markdown")
+                except:
+                    await query.message.reply_text(text[:4000], reply_markup=InlineKeyboardMarkup(btn), parse_mode="Markdown")
             else:
                 await query.message.reply_text(text[:4000], reply_markup=InlineKeyboardMarkup(btn), parse_mode="Markdown")
 
@@ -116,12 +125,12 @@ async def cb_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         doc_ref = data.split("|")[1]
         episodes = DATA.get_episodes(doc_ref)
         if not episodes:
-            await query.message.reply_text("❌ لا توجد حلقات متاحة حالياً.")
+            await query.message.reply_text("❌ عذراً، لا توجد حلقات متاحة لهذا العمل حالياً.")
             return
         
         buttons = []
         row = []
-        for ep in episodes[:60]: # Show up to 60 episodes
+        for ep in episodes[:80]: # Increased limit to 80 episodes
             row.append(InlineKeyboardButton(f"H {ep['order']}", callback_data=f"srv|{doc_ref}|{ep['id']}|{ep['order']}"))
             if len(row) == 4:
                 buttons.append(row)
@@ -133,16 +142,15 @@ async def cb_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         _, dr, ei, eo = data.split("|")
         servers = DATA.get_servers(dr, ei)
         if servers:
-            # Direct view button
+            # Direct view button (Official PixelDrain View Link)
             btn = [[InlineKeyboardButton("🎬 مشاهدة الآن في المتصفح", url=servers[0]["url"])]]
-            # Also show other servers if available
             if len(servers) > 1:
                 other_btns = [[InlineKeyboardButton(f"🔗 {s['name']}", url=s['url'])] for s in servers[1:5]]
                 btn.extend(other_btns)
             
-            await query.message.reply_text(f"🎬 حلقة {eo} جاهزة للمشاهدة:", reply_markup=InlineKeyboardMarkup(btn))
+            await query.message.reply_text(f"🎬 حلقة {eo} جاهزة. اضغط للمشاهدة:", reply_markup=InlineKeyboardMarkup(btn))
         else:
-            await query.message.reply_text("❌ عذراً، لم يتم العثور على روابط لهذه الحلقة.")
+            await query.message.reply_text("❌ عذراً، لم نجد روابط مشاهدة لهذه الحلقة.")
 
 application.add_handler(CommandHandler("start", start))
 application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_text))

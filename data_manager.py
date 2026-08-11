@@ -28,16 +28,23 @@ class DataManager:
 
     def search_algolia(self, index, query):
         url = f"https://{self.algolia_app_id}-dsn.algolia.net/1/indexes/{index}/query"
-        headers = {"X-Algolia-Application-Id": self.algolia_app_id, "X-Algolia-API-Key": self.algolia_api_key}
+        headers = {
+            "X-Algolia-Application-Id": self.algolia_app_id, 
+            "X-Algolia-API-Key": self.algolia_api_key
+        }
         try:
-            res = requests.post(url, headers=headers, json={"params": f"query={query}&hitsPerPage=10"}, timeout=3)
+            # Query multiple fields for better Arabic/English support
+            res = requests.post(url, headers=headers, json={
+                "params": f"query={query}&hitsPerPage=20&attributesToRetrieve=name,title,arabic_name,doc_ref,path,poster"
+            }, timeout=3)
             return res.json().get("hits", [])
         except: return []
 
     def search_anime(self, query):
-        indices = ["all_anime", "series", "movies", "anime_list"]
+        # Search across all primary indices for maximum coverage
+        indices = ["all_anime", "series", "movies", "anime_list", "latest_episodes"]
         all_hits = []
-        with ThreadPoolExecutor(max_workers=4) as executor:
+        with ThreadPoolExecutor(max_workers=5) as executor:
             futures = [executor.submit(self.search_algolia, idx, query) for idx in indices]
             for f in futures: all_hits.extend(f.result())
         
@@ -45,16 +52,22 @@ class DataManager:
         for h in all_hits:
             oid = h.get("objectID")
             if oid not in unique:
+                # Extract the best possible name from available fields
                 name = h.get("name") or h.get("title") or h.get("arabic_name") or "Unknown"
                 unique[oid] = {
                     "name": name,
-                    "doc_ref": h.get("doc_ref") or h.get("path") or f"anime_list/{oid}"
+                    "doc_ref": h.get("doc_ref") or h.get("path") or f"anime_list/{oid}",
+                    "poster": h.get("poster")
                 }
         
         results = list(unique.values())
-        # Enhanced fuzzy matching for better results
-        results.sort(key=lambda x: fuzz.token_set_ratio(query.lower(), x["name"].lower()), reverse=True)
-        return results[:10]
+        # Smart sorting: prioritize exact matches and high similarity in both languages
+        results.sort(key=lambda x: max(
+            fuzz.token_set_ratio(query.lower(), x["name"].lower()),
+            fuzz.partial_ratio(query.lower(), x["name"].lower())
+        ), reverse=True)
+        
+        return results[:15] # Return top 15 results for better choice
 
     def get_anime_details(self, doc_ref):
         url = f"{self.firestore_base_url}/{doc_ref}"
@@ -64,7 +77,7 @@ class DataManager:
             f = res.json().get("fields", {})
             return {
                 "name": f.get("name", {}).get("stringValue") or f.get("title", {}).get("stringValue", "Unknown"),
-                "story": f.get("story", {}).get("stringValue", "لا يوجد وصف."),
+                "story": f.get("story", {}).get("stringValue", "لا يوجد وصف متوفر حالياً."),
                 "rating": f.get("rating", {}).get("stringValue", "N/A"),
                 "poster": f.get("poster", {}).get("stringValue")
             }
@@ -81,6 +94,7 @@ class DataManager:
                 f = d.get("fields", {})
                 name = f.get("name", {}).get("stringValue", "Unknown")
                 eid = d.get("name").split("/")[-1]
+                # Extract numbers from name (e.g., "الحلقة 1" -> 1)
                 try: order = int("".join(filter(str.isdigit, name)))
                 except: order = 999
                 eps.append({"id": eid, "name": name, "order": order})
@@ -93,6 +107,7 @@ class DataManager:
             match = re.search(r"(?:/u/|/api/file/|/l/)([a-zA-Z0-9]+)", url)
             if match:
                 file_id = match.group(1)
+                # Browser view link vs Direct download/M3u8 link
                 return f"https://pixeldrain.com/u/{file_id}" if mode == "view" else f"https://pixeldrain.com/api/file/{file_id}?download"
         return url
 
@@ -108,6 +123,7 @@ class DataManager:
                 name = f.get("name", {}).get("stringValue", "Server")
                 link = f.get("link", {}).get("stringValue", "")
                 if not link:
+                    # Fallback for hidden links
                     for k, b in [("streamtape_video_id", "https://streamtape.com/e/"), ("mixdrop_video_id", "https://mixdrop.co/e/")]:
                         if k in f: link = b + f[k].get("stringValue", ""); break
                 if link:
@@ -117,11 +133,13 @@ class DataManager:
                         "app_url": self.resolve_pd(link, mode="download"),
                         "is_pd": "pixeldrain" in link.lower()
                     })
+            # Prioritize PD servers
             servers.sort(key=lambda x: x["is_pd"], reverse=True)
             return servers
         except: return []
 
     def parse_smart_query(self, q):
+        # Handle formats like "Naruto 1" or "ون بيس الحلقة 100"
         m = re.search(r"(.+)\s+(?:الحلقة|حلقة|episode|ep|part)\s+(\d+)", q, re.I)
         if not m: m = re.search(r"(.+)\s+(\d+)$", q)
         if m: return m.group(1).strip(), int(m.group(2))
