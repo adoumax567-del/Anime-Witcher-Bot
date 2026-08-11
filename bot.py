@@ -52,7 +52,10 @@ async def webhook(request: Request):
 # --- BOT HANDLERS ---
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    keyboard = [["🎬 مشاهدة", "🔍 بحث"]]
+    keyboard = [
+        ["🎬 مشاهدة", "🔍 بحث"],
+        ["❓ مساعدة"]
+    ]
     await update.message.reply_text(
         "🌟 **مرحباً بك في Anime Witcher Pro** 🌟\n\n"
         "أنا دليلك الشامل لمشاهدة الأنمي، الأفلام، والمسلسلات بأعلى جودة وبكل سهولة.\n\n"
@@ -65,12 +68,29 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         parse_mode="Markdown"
     )
 
+async def show_help(update: Update):
+    help_text = (
+        "❓ **كيفية استخدام البوت:**\n\n"
+        "1️⃣ **البحث:** اضغط على زر '🔍 بحث' أو '🎬 مشاهدة' ثم اكتب اسم الأنمي أو الفيلم (بالعربي أو الإنجليزي).\n"
+        "2️⃣ **اختيار العمل:** ستظهر لك قائمة بالنتائج، اختر العمل الذي تريده.\n"
+        "3️⃣ **المعلومات:** يمكنك قصة الأنمي وتفاصيله بالضغط على '📖 وصف الأنمي'.\n"
+        "4️⃣ **المشاهدة:** اضغط على '📺 عرض الحلقات' ثم اختر رقم الحلقة، وسيظهر لك زر للمشاهدة في المتصفح فوراً.\n\n"
+        "💡 **نصيحة:** إذا كان الأنمي طويلاً، استخدم أزرار 'المزيد' للتنقل بين مئات الحلقات.\n\n"
+        "🏠 يمكنك العودة للرئيسية في أي وقت باستخدام زر '🏠 الرئيسية'."
+    )
+    buttons = [[InlineKeyboardButton("🏠 العودة للرئيسية", callback_data="go_home")]]
+    await update.message.reply_text(help_text, reply_markup=InlineKeyboardMarkup(buttons), parse_mode="Markdown")
+
 async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
     text = update.message.text
     
     if text == "🎬 مشاهدة" or text == "🔍 بحث":
         await update.message.reply_text("🔎 **من فضلك اكتب اسم العمل الذي تبحث عنه:**\n(مثال: ناروتو، One Piece، سالي)")
         context.user_data['waiting_for_name'] = True
+        return
+
+    if text == "❓ مساعدة":
+        await show_help(update)
         return
 
     if context.user_data.get('waiting_for_name'):
@@ -86,6 +106,7 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await show_anime_options(update, results[0])
         else:
             buttons = [[InlineKeyboardButton(f"📁 {r['name']}", callback_data=f"opt|{r['doc_ref']}")] for r in results]
+            buttons.append([InlineKeyboardButton("🏠 الرئيسية", callback_data="go_home")])
             await update.message.reply_text("✨ **إليك أفضل النتائج المتوفرة:**", reply_markup=InlineKeyboardMarkup(buttons))
         
         context.user_data['waiting_for_name'] = False
@@ -114,7 +135,7 @@ async def show_anime_options(update: Update, anime):
     
     buttons = [
         [InlineKeyboardButton("📺 عرض الحلقات", callback_data=f"eps|{anime['doc_ref']}|0")],
-        [InlineKeyboardButton("🔍 بحث جديد", callback_data="new_search")]
+        [InlineKeyboardButton("🔍 بحث جديد", callback_data="new_search"), InlineKeyboardButton("🏠 الرئيسية", callback_data="go_home")]
     ]
     
     try:
@@ -140,7 +161,15 @@ async def cb_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await query.answer()
     data = query.data
     
-    if data == "new_search":
+    if data == "go_home":
+        keyboard = [["🎬 مشاهدة", "🔍 بحث"], ["❓ مساعدة"]]
+        await query.message.reply_text(
+            "🏠 **عدنا إلى القائمة الرئيسية.**\nماذا تريد أن تفعل الآن؟",
+            reply_markup=ReplyKeyboardMarkup(keyboard, resize_keyboard=True),
+            parse_mode="Markdown"
+        )
+
+    elif data == "new_search":
         await query.message.reply_text("🔎 **اكتب اسم العمل الجديد:**")
         context.user_data['waiting_for_name'] = True
 
@@ -159,7 +188,6 @@ async def cb_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await query.message.reply_text("❌ **عذراً، لا توجد حلقات متاحة حالياً.**")
             return
         
-        # Slice episodes based on offset and limit
         current_batch = episodes[offset : offset + limit]
         
         buttons = []
@@ -171,26 +199,23 @@ async def cb_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 row = []
         if row: buttons.append(row)
         
-        # Add pagination buttons
         nav_buttons = []
         if offset > 0:
             nav_buttons.append(InlineKeyboardButton("⬅️ السابق", callback_data=f"eps|{doc_ref}|{max(0, offset - limit)}"))
         if offset + limit < len(episodes):
-            nav_buttons.append(InlineKeyboardButton("المزيد من الحلقات ➡️", callback_data=f"eps|{doc_ref}|{offset + limit}"))
+            nav_buttons.append(InlineKeyboardButton("المزيد ➡️", callback_data=f"eps|{doc_ref}|{offset + limit}"))
         
         if nav_buttons:
             buttons.append(nav_buttons)
         
+        buttons.append([InlineKeyboardButton("🏠 الرئيسية", callback_data="go_home")])
+        
         text = f"🎬 **قائمة الحلقات ({offset + 1} - {min(offset + limit, len(episodes))} من {len(episodes)}):**"
         
-        if offset == 0 and not update.callback_query.message.photo:
+        try:
+            await query.edit_message_text(text, reply_markup=InlineKeyboardMarkup(buttons), parse_mode="Markdown")
+        except:
             await query.message.reply_text(text, reply_markup=InlineKeyboardMarkup(buttons), parse_mode="Markdown")
-        else:
-            # Edit existing message to avoid spam if it's a text message, or send new if photo
-            try:
-                await query.edit_message_text(text, reply_markup=InlineKeyboardMarkup(buttons), parse_mode="Markdown")
-            except:
-                await query.message.reply_text(text, reply_markup=InlineKeyboardMarkup(buttons), parse_mode="Markdown")
 
     elif data.startswith("srv|"):
         _, dr, ei, eo = data.split("|")
@@ -200,6 +225,8 @@ async def cb_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             if len(servers) > 1:
                 other_btns = [[InlineKeyboardButton(f"🔗 {s['name']}", url=s['url'])] for s in servers[1:4]]
                 btn.extend(other_btns)
+            
+            btn.append([InlineKeyboardButton("🏠 الرئيسية", callback_data="go_home")])
             
             await query.message.reply_text(
                 f"✅ **الحلقة {eo} جاهزة للمشاهدة!**\n\nاضغط على الزر أدناه للانتقال للمشغل المباشر:",
