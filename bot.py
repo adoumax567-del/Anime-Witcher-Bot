@@ -54,7 +54,7 @@ async def webhook(request: Request):
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     keyboard = [
         ["🎬 استكشاف المحتوى", "🔍 البحث المتقدم"],
-        ["❓ مركز المساعدة"]
+        ["👤 بحث عن شخصية", "❓ مركز المساعدة"]
     ]
     welcome_text = (
         "💠 **منصة Anime Witcher Pro v2.0** 💠\n"
@@ -91,8 +91,13 @@ async def show_help(update: Update):
 async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
     text = update.message.text
     
-    if text in ["🎬 استكشاف المحتوى", "🔍 البحث المتقدم"]:
-        await update.message.reply_text("📥 **يرجى إدخال عنوان العمل المطلوب:**\n(مثال: ون بيس، Naruto، المحقق كونان)")
+    if text in ["🎬 استكشاف المحتوى", "🔍 البحث المتقدم", "👤 بحث عن شخصية"]:
+        context.user_data['search_mode'] = "character" if text == "👤 بحث عن شخصية" else "anime"
+        if text == "👤 بحث عن شخصية":
+            prompt = "📥 اكتب اسم الشخصية التي تريد البحث عنها.\nمثال: Naruto Uzumaki أو Conan Edogawa أو Itachi Uchiha"
+        else:
+            prompt = "📥 اكتب اسم الفيلم أو مسلسل الأنمي كاملاً.\nمثال: One Piece أو Naruto Shippuden أو Detective Conan"
+        await update.message.reply_text(prompt)
         context.user_data['waiting_for_name'] = True
         return
 
@@ -102,6 +107,10 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     if context.user_data.get('waiting_for_name'):
         name, ep_num = DATA.parse_smart_query(text)
+        if context.user_data.get('search_mode') == "character":
+            await search_character_flow(update, context, name)
+            context.user_data['waiting_for_name'] = False
+            return
         status = await update.message.reply_text(f"📡 **جاري الاتصال بقاعدة البيانات...**\nتحليل الطلب: `{name}`", parse_mode="Markdown")
         
         try:
@@ -132,6 +141,49 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
         
         context.user_data['waiting_for_name'] = False
         return
+
+async def search_character_flow(update: Update, context: ContextTypes.DEFAULT_TYPE, name: str):
+    try:
+        matches = DATA.search_characters(name)
+        if not matches:
+            await update.message.reply_text(
+                "لم أعثر على شخصية مطابقة لهذا البحث.\n\nجرّب الاسم بالإنجليزية أو اكتب اسماً كاملاً، مثل Naruto Uzumaki أو Conan Edogawa.",
+                reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🏠 الرئيسية", callback_data="go_home")]])
+            )
+            return
+        if len(matches) == 1:
+            await show_character(update, matches[0])
+            return
+        buttons = [[InlineKeyboardButton(f"👤 {item['name']}", callback_data=f"char|{item['id']}")] for item in matches]
+        buttons.append([InlineKeyboardButton("🏠 الرئيسية", callback_data="go_home")])
+        await update.message.reply_text("اختر الشخصية المطلوبة من النتائج التالية:", reply_markup=InlineKeyboardMarkup(buttons))
+        context.user_data['character_matches'] = {str(item['id']): item for item in matches}
+    except Exception:
+        logger.exception("Character search error")
+        await update.message.reply_text("تعذر إتمام بحث الشخصيات حالياً. يرجى المحاولة بعد قليل.", reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🏠 الرئيسية", callback_data="go_home")]]))
+
+async def show_character(update: Update, character):
+    details = DATA.get_character_details(character)
+    title = details["name"]
+    if details.get("name_en") and details["name_en"] != title:
+        title = f"{title} | {details['name_en']}"
+    works = details.get("works") or []
+    works_text = "\n".join(f"• {work.get('title') or work.get('name') or work}" if isinstance(work, dict) else f"• {work}" for work in works)
+    text = (
+        f"👤 ملف الشخصية\n━━━━━━━━━━━━━━━━━━\n"
+        f"الاسم: {title}\n\n"
+        f"نبذة:\n{details['description'][:1000]}\n\n"
+        f"الأعمال المرتبطة:\n{works_text or 'لا تتوفر قائمة الأعمال حالياً.'}\n━━━━━━━━━━━━━━━━━━"
+    )
+    markup = InlineKeyboardMarkup([[InlineKeyboardButton("🏠 الرئيسية", callback_data="go_home")]])
+    target = update.callback_query.message if update.callback_query else update.message
+    if details.get("poster"):
+        try:
+            await target.reply_photo(photo=details["poster"], caption=text, reply_markup=markup)
+            return
+        except Exception:
+            logger.warning("Character poster could not be sent", exc_info=True)
+    await target.reply_text(text, reply_markup=markup)
 
 async def show_anime_options(update: Update, anime):
     details = DATA.get_anime_details(anime['doc_ref'])
@@ -185,7 +237,7 @@ async def cb_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     data = query.data
     
     if data == "go_home":
-        keyboard = [["🎬 استكشاف المحتوى", "🔍 البحث المتقدم"], ["❓ مركز المساعدة"]]
+        keyboard = [["🎬 استكشاف المحتوى", "🔍 البحث المتقدم"], ["👤 بحث عن شخصية", "❓ مركز المساعدة"]]
         await query.message.reply_text(
             "🏠 **تمت العودة إلى المنصة الرئيسية.**\nيرجى اختيار الإجراء المطلوب من القائمة أدناه:",
             reply_markup=ReplyKeyboardMarkup(keyboard, resize_keyboard=True),
@@ -195,6 +247,14 @@ async def cb_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     elif data == "new_search":
         await query.message.reply_text("📥 **يرجى إدخال عنوان العمل الجديد:**")
         context.user_data['waiting_for_name'] = True
+
+    elif data.startswith("char|"):
+        item_id = data.split("|", 1)[1]
+        character = context.user_data.get('character_matches', {}).get(item_id)
+        if character:
+            await show_character(update, character)
+        else:
+            await query.message.reply_text("انتهت صلاحية نتيجة البحث. ابدأ بحثاً جديداً من القائمة الرئيسية.", reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🏠 الرئيسية", callback_data="go_home")]]))
 
     elif data.startswith("opt|"):
         doc_ref = data.split("|")[1]

@@ -40,6 +40,61 @@ class DataManager:
             logger.error(f"Algolia search error on index {index}: {e}")
             return []
 
+    def search_characters(self, query):
+        """Search character records across likely Anime Witcher Algolia indexes."""
+        query = query.strip()
+        if not query:
+            return []
+        indexes = ["characters", "character", "people", "anime_characters"]
+        hits = []
+        with ThreadPoolExecutor(max_workers=len(indexes)) as executor:
+            futures = [executor.submit(self.search_algolia, idx, query) for idx in indexes]
+            for future in futures:
+                hits.extend(future.result())
+        unique = {}
+        normalized_query = self.normalize_text(query)
+        for hit in hits:
+            name = (hit.get("name") or hit.get("character_name") or
+                    hit.get("title") or hit.get("english_name") or
+                    hit.get("arabic_name"))
+            if not name:
+                continue
+            key = str(hit.get("objectID") or hit.get("id") or name).lower()
+            score = max(fuzz.token_set_ratio(normalized_query, self.normalize_text(str(name))),
+                        fuzz.partial_ratio(normalized_query, self.normalize_text(str(name))))
+            if score < 35:
+                continue
+            unique[key] = {
+                "id": hit.get("objectID") or hit.get("id") or key,
+                "name": name,
+                "name_ar": hit.get("arabic_name") or hit.get("name_ar"),
+                "name_en": hit.get("english_name") or hit.get("name_en"),
+                "description": hit.get("description") or hit.get("story") or hit.get("about"),
+                "poster": hit.get("poster") or hit.get("image") or hit.get("cover"),
+                "works": hit.get("works") or hit.get("anime") or hit.get("appearances") or [],
+                "score": score,
+            }
+        return sorted(unique.values(), key=lambda item: item["score"], reverse=True)[:20]
+
+    @staticmethod
+    def normalize_text(value):
+        value = str(value or "").lower().strip()
+        return re.sub(r"[أإآٱ]", "ا", value).replace("ة", "ه").replace("ى", "ي")
+
+    def get_character_details(self, character):
+        """Normalize character fields from Algolia for a stable bot response."""
+        works = character.get("works") or []
+        if isinstance(works, str):
+            works = [works]
+        return {
+            "name": character.get("name") or "شخصية غير معروفة",
+            "name_ar": character.get("name_ar"),
+            "name_en": character.get("name_en"),
+            "description": character.get("description") or "لا تتوفر نبذة عن هذه الشخصية حالياً.",
+            "poster": character.get("poster"),
+            "works": works[:30],
+        }
+
     def search_anime(self, query):
         query = query.strip()
         norm_query = query.replace('أ', 'ا').replace('إ', 'ا').replace('آ', 'ا').replace('ة', 'ه').replace('ى', 'ي')
