@@ -179,27 +179,24 @@ async def show_character(update: Update, character):
         title = f"{title} | {details['name_en']}"
     works = details.get("works") or []
     works_text = "\n".join(f"• {work.get('title') or work.get('name') or work}" if isinstance(work, dict) else f"• {work}" for work in works)
-    info_text = (
+    text = (
+        f"👤 ملف الشخصية\n━━━━━━━━━━━━━━━━━━\n"
         f"الاسم: {title}\n\n"
         f"نبذة:\n{details['description'][:2200]}\n\n"
-        f"الأعمال المرتبطة:\n{works_text or 'لا تتوفر قائمة الأعمال حالياً.'}\n"
-        "━━━━━━━━━━━━━━━━━━"
+        f"الأعمال المرتبطة:\n{works_text or 'لا تتوفر قائمة الأعمال حالياً.'}\n━━━━━━━━━━━━━━━━━━"
     )
     markup = InlineKeyboardMarkup([[InlineKeyboardButton("🏠 الرئيسية", callback_data="go_home")]])
     target = update.callback_query.message if update.callback_query else update.message
-    # Telegram limits photo captions to 1024 characters. Keep the image message
-    # short and send the complete, accurate profile immediately after it.
     if details.get("poster"):
         try:
-            await target.reply_photo(
-                photo=details["poster"],
-                caption=f"👤 ملف الشخصية\n\n{title}",
-            )
-            await target.reply_text(info_text, reply_markup=markup)
+            # Keep caption short so Telegram accepts the image, then send the
+            # complete profile as the following message.
+            await target.reply_photo(photo=details["poster"], caption=f"👤 ملف الشخصية\n\n{title}")
+            await target.reply_text(text, reply_markup=markup)
             return
         except Exception:
             logger.warning("Character poster could not be sent", exc_info=True)
-    await target.reply_text(f"👤 ملف الشخصية\n\n{info_text}", reply_markup=markup)
+    await target.reply_text(text, reply_markup=markup)
 
 async def show_anime_options(update: Update, anime):
     details = DATA.get_anime_details(anime['doc_ref'])
