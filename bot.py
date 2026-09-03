@@ -114,7 +114,7 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
         status = await update.message.reply_text(f"📡 **جاري الاتصال بقاعدة البيانات...**\nتحليل الطلب: `{name}`", parse_mode="Markdown")
         
         try:
-            results = DATA.search_anime(name)
+            results = await asyncio.wait_for(asyncio.to_thread(DATA.search_anime, name), timeout=25)
             
             if not results:
                 await status.edit_text(
@@ -143,27 +143,37 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
 
 async def search_character_flow(update: Update, context: ContextTypes.DEFAULT_TYPE, name: str):
+    status = await update.message.reply_text(
+        f"📡 جاري البحث عن الشخصية: {name}\nقد تستغرق العملية لحظات قليلة..."
+    )
     try:
-        matches = DATA.search_characters(name)
+        matches = await asyncio.wait_for(asyncio.to_thread(DATA.search_characters, name), timeout=25)
         if not matches:
-            await update.message.reply_text(
+            await status.edit_text(
                 "لم أعثر على شخصية مطابقة لهذا البحث.\n\nجرّب الاسم بالإنجليزية أو اكتب اسماً كاملاً، مثل Naruto Uzumaki أو Conan Edogawa.",
                 reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🏠 الرئيسية", callback_data="go_home")]])
             )
             return
         if len(matches) == 1:
+            await status.delete()
             await show_character(update, matches[0])
             return
         buttons = [[InlineKeyboardButton(f"👤 {item['name']}", callback_data=f"char|{item['id']}")] for item in matches]
         buttons.append([InlineKeyboardButton("🏠 الرئيسية", callback_data="go_home")])
-        await update.message.reply_text("اختر الشخصية المطلوبة من النتائج التالية:", reply_markup=InlineKeyboardMarkup(buttons))
+        await status.edit_text("اختر الشخصية المطلوبة من النتائج التالية:", reply_markup=InlineKeyboardMarkup(buttons))
         context.user_data['character_matches'] = {str(item['id']): item for item in matches}
+    except asyncio.TimeoutError:
+        logger.error("Character search timed out for query=%r", name)
+        await status.edit_text("⏱️ استغرق البحث وقتاً أطول من المتوقع. جرّب الاسم الكامل أو أعد المحاولة بعد قليل.", reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🏠 الرئيسية", callback_data="go_home")]]))
     except Exception:
         logger.exception("Character search error")
-        await update.message.reply_text("تعذر إتمام بحث الشخصيات حالياً. يرجى المحاولة بعد قليل.", reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🏠 الرئيسية", callback_data="go_home")]]))
+        await status.edit_text("تعذر إتمام بحث الشخصيات حالياً. يرجى المحاولة بعد قليل.", reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🏠 الرئيسية", callback_data="go_home")]]))
 
 async def show_character(update: Update, character):
-    details = DATA.get_character_details(character)
+    try:
+        details = await asyncio.wait_for(asyncio.to_thread(DATA.get_character_details, character), timeout=8)
+    except asyncio.TimeoutError:
+        details = DATA.get_character_details({**character, "description": character.get("description") or "", "works": character.get("works") or []})
     title = details["name"]
     if details.get("name_en") and details["name_en"] != title:
         title = f"{title} | {details['name_en']}"

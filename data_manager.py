@@ -69,9 +69,11 @@ class DataManager:
                 "name": name,
                 "name_ar": hit.get("arabic_name") or hit.get("name_ar"),
                 "name_en": hit.get("english_name") or hit.get("name_en"),
-                "description": hit.get("description") or hit.get("story") or hit.get("about"),
-                "poster": hit.get("poster") or hit.get("image") or hit.get("cover"),
-                "works": hit.get("works") or hit.get("anime") or hit.get("appearances") or [],
+                "description": hit.get("description") or hit.get("story") or hit.get("about") or hit.get("bio"),
+                "poster": hit.get("poster") or hit.get("image") or hit.get("cover") or hit.get("main_picture"),
+                "works": hit.get("works") or hit.get("anime") or hit.get("appearances") or hit.get("related_works") or [],
+                "doc_ref": hit.get("doc_ref") or hit.get("path"),
+                "mal_id": hit.get("mal_id") or hit.get("id") or hit.get("objectID"),
                 "score": score,
             }
         return sorted(unique.values(), key=lambda item: item["score"], reverse=True)[:20]
@@ -82,16 +84,64 @@ class DataManager:
         return re.sub(r"[أإآٱ]", "ا", value).replace("ة", "ه").replace("ى", "ي")
 
     def get_character_details(self, character):
-        """Normalize character fields from Algolia for a stable bot response."""
+        """Normalize character fields and optionally enrich sparse Algolia records."""
         works = character.get("works") or []
         if isinstance(works, str):
             works = [works]
+        description = character.get("description")
+        poster = character.get("poster")
+        mal_id = character.get("mal_id") or character.get("id")
+
+        # Character documents contain the complete profile, while Algolia often
+        # indexes only name, image and objectID. Read that document when sparse.
+        if (not description or not works) and character.get("doc_ref"):
+            try:
+                url = f"{self.firestore_base_url}/{str(character['doc_ref']).lstrip('/')}"
+                response = requests.get(url, params={"key": self.firebase_api_key}, timeout=6)
+                if response.status_code == 200:
+                    fields = response.json().get("fields", {})
+                    def unwrap(value):
+                        if not isinstance(value, dict):
+                            return value
+                        if "stringValue" in value: return value["stringValue"]
+                        if "integerValue" in value: return value["integerValue"]
+                        if "doubleValue" in value: return value["doubleValue"]
+                        if "mapValue" in value:
+                            return {k: unwrap(v) for k, v in value["mapValue"].get("fields", {}).items()}
+                        if "arrayValue" in value:
+                            return [unwrap(v) for v in value["arrayValue"].get("values", [])]
+                        return None
+                    raw = {key: unwrap(value) for key, value in fields.items()}
+                    nested = raw.get("data") if isinstance(raw.get("data"), dict) else {}
+                    profile = {**nested, **raw}
+                    description = description or profile.get("about") or profile.get("description") or profile.get("story")
+                    poster = poster or profile.get("main_picture") or profile.get("image")
+                    if not works:
+                        works = []
+                        for entry in profile.get("anime", []) or []:
+                            item = entry.get("anime", entry) if isinstance(entry, dict) else entry
+                            if isinstance(item, dict) and item.get("title"):
+                                works.append(item["title"])
+            except Exception as exc:
+                logger.info("Character document unavailable for %s: %s", mal_id, exc)
+
+        # Keep a short best-effort external fallback only when the app document
+        # is unavailable; it is never required for returning a usable profile.
+        if (not description or not works) and str(mal_id).isdigit():
+            try:
+                enriched = requests.get(f"https://api.jikan.moe/v4/characters/{mal_id}/full", timeout=4).json().get("data", {})
+                description = description or enriched.get("about")
+                poster = poster or enriched.get("images", {}).get("jpg", {}).get("image_url")
+                if not works:
+                    works = [e.get("anime", {}).get("title") for e in enriched.get("anime", []) if e.get("anime", {}).get("title")]
+            except Exception:
+                pass
         return {
             "name": character.get("name") or "شخصية غير معروفة",
             "name_ar": character.get("name_ar"),
             "name_en": character.get("name_en"),
-            "description": character.get("description") or "لا تتوفر نبذة عن هذه الشخصية حالياً.",
-            "poster": character.get("poster"),
+            "description": description or "شخصية من مكتبة Anime Witcher. لا تتوفر نبذة إضافية حالياً.",
+            "poster": poster,
             "works": works[:30],
         }
 
