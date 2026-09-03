@@ -211,7 +211,7 @@ class DataManager:
     def get_anime_details(self, doc_ref):
         # Ensure doc_ref format is correct
         if not doc_ref.startswith("http"):
-            url = f"{self.firestore_base_url}/{doc_ref}"
+            url = f"{self.firestore_base_url}/{str(doc_ref).lstrip('/')}"
         else:
             url = doc_ref
             
@@ -272,13 +272,13 @@ class DataManager:
             }
 
     def get_episodes(self, doc_ref):
-        url = f"{self.firestore_base_url}/{doc_ref}/episodes"
+        url = f"{self.firestore_base_url}/{str(doc_ref).lstrip('/')}/episodes"
         headers = {"Authorization": f"Bearer {self.id_token}"} if self.id_token else {}
         try:
             res = requests.get(url, headers=headers, params={"key": self.firebase_api_key}, timeout=10)
             if res.status_code != 200:
-                # Generate mock episodes if subcollection isn't directly structured that way
-                return [{"id": f"ep_{i}", "name": f"الحلقة {i}", "order": i} for i in range(1, 25)]
+                logger.warning("Episodes unavailable for %s: HTTP %s", doc_ref, res.status_code)
+                return []
             docs = res.json().get("documents", [])
             eps = []
             for d in docs:
@@ -291,10 +291,10 @@ class DataManager:
                 except: order = 999
                 eps.append({"id": eid, "name": name, "order": order})
             eps.sort(key=lambda x: x["order"])
-            return eps if eps else [{"id": "ep_1", "name": "الحلقة 1", "order": 1}]
+            return eps
         except Exception as e:
             logger.error(f"Error fetching episodes: {e}")
-            return [{"id": "ep_1", "name": "الحلقة 1", "order": 1}]
+            return []
 
     def resolve_pd(self, url, mode="view"):
         if "pixeldrain.com" in url:
@@ -305,13 +305,13 @@ class DataManager:
         return url
 
     def get_servers(self, doc_ref, ep_id):
-        url = f"{self.firestore_base_url}/{doc_ref}/episodes/{ep_id}/servers"
+        url = f"{self.firestore_base_url}/{str(doc_ref).lstrip('/')}/episodes/{ep_id}/servers"
         headers = {"Authorization": f"Bearer {self.id_token}"} if self.id_token else {}
         try:
             res = requests.get(url, headers=headers, params={"key": self.firebase_api_key}, timeout=10)
             if res.status_code != 200:
-                # Fallback direct server search
-                return [{"name": "PixelDrain (سيرفر أساسي)", "url": "https://pixeldrain.com/u/N4vYwz5v", "app_url": "https://pixeldrain.com/api/file/N4vYwz5v?download", "is_pd": True}]
+                logger.warning("Servers unavailable for %s/%s: HTTP %s", doc_ref, ep_id, res.status_code)
+                return []
             docs = res.json().get("documents", [])
             servers = []
             for d in docs:
@@ -329,12 +329,12 @@ class DataManager:
                         "is_pd": "pixeldrain" in link.lower()
                     })
             if not servers:
-                servers = [{"name": "PixelDrain (سيرفر أساسي)", "url": "https://pixeldrain.com/u/N4vYwz5v", "app_url": "https://pixeldrain.com/api/file/N4vYwz5v?download", "is_pd": True}]
+                servers = []
             servers.sort(key=lambda x: x["is_pd"], reverse=True)
             return servers
         except Exception as e:
             logger.error(f"Error fetching servers: {e}")
-            return [{"name": "PixelDrain (سيرفر أساسي)", "url": "https://pixeldrain.com/u/N4vYwz5v", "app_url": "https://pixeldrain.com/api/file/N4vYwz5v?download", "is_pd": True}]
+            return []
 
     def parse_smart_query(self, q):
         m = re.search(r"(.+)\s+(?:الحلقة|حلقة|episode|ep|part|epsiode|الحلقه)\s+(\d+)", q, re.I)
