@@ -202,24 +202,34 @@ async def show_anime_options(update: Update, anime):
     details = DATA.get_anime_details(anime['doc_ref'])
     if not details:
         await update.message.reply_text(
-            "⚠️ **عذراً، حدث خطأ أثناء استرداد بيانات العمل.**",
+            "⚠️ عذراً، حدث خطأ أثناء استرداد بيانات العمل.",
             reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🏠 الرئيسية", callback_data="go_home")]])
         )
         return
 
+    rating = details['rating']
+    if isinstance(rating, dict):
+        rating = rating.get('rate') or rating.get('value') or 'غير متوفر'
+    genres = details['genres']
+    if isinstance(genres, (list, tuple)):
+        genres = '، '.join(map(str, genres))
+    studio = details['studio']
+    if isinstance(studio, (list, tuple)):
+        studio = '، '.join(map(str, studio))
     text = (
-        f"🌟 **{details['name']}**\n"
+        f"🎬 معلومات العمل: {details['name']}\n"
         f"━━━━━━━━━━━━━━━━━━\n"
-        f"🏆 **التقييم العام:** `{details['rating']}`\n"
-        f"📅 **سنة الإصدار:** `{details['year']}`\n"
-        f"🎭 **التصنيف:** `{details['genres']}`\n"
-        f"🎬 **الاستوديو:** `{details['studio']}`\n"
-        f"🔄 **الحالة:** `{details['status']}`\n"
-        f"🔢 **إجمالي الحلقات:** `{details['num_episodes']}`\n"
+        f"🏆 التقييم العام: {rating}\n"
+        f"📅 سنة الإصدار: {details['year']}\n"
+        f"🎭 التصنيف: {genres}\n"
+        f"🎬 الاستوديو: {studio}\n"
+        f"🔄 الحالة: {details['status']}\n"
+        f"🔢 إجمالي الحلقات: {details['num_episodes']}\n"
         f"━━━━━━━━━━━━━━━━━━\n"
-        f"📝 **ملخص القصة:**\n_{details['story'][:600]}..._\n"
+        f"📝 ملخص القصة:\n{str(details['story'])[:600]}...\n"
         f"━━━━━━━━━━━━━━━━━━"
     )
+    caption = text[:1000] if len(text) > 1000 else text
     
     buttons = [
         [InlineKeyboardButton("📺 استعراض قائمة الحلقات", callback_data=f"eps|{anime['doc_ref']}|0")],
@@ -229,20 +239,20 @@ async def show_anime_options(update: Update, anime):
     try:
         if details.get("poster"):
             if update.callback_query:
-                await update.callback_query.message.reply_photo(photo=details["poster"], caption=text, reply_markup=InlineKeyboardMarkup(buttons), parse_mode="Markdown")
+                await update.callback_query.message.reply_photo(photo=details["poster"], caption=caption, reply_markup=InlineKeyboardMarkup(buttons))
             else:
-                await update.message.reply_photo(photo=details["poster"], caption=text, reply_markup=InlineKeyboardMarkup(buttons), parse_mode="Markdown")
+                await update.message.reply_photo(photo=details["poster"], caption=caption, reply_markup=InlineKeyboardMarkup(buttons))
         else:
             if update.callback_query:
-                await update.callback_query.message.reply_text(text, reply_markup=InlineKeyboardMarkup(buttons), parse_mode="Markdown")
+                await update.callback_query.message.reply_text(text, reply_markup=InlineKeyboardMarkup(buttons))
             else:
-                await update.message.reply_text(text, reply_markup=InlineKeyboardMarkup(buttons), parse_mode="Markdown")
+                await update.message.reply_text(text, reply_markup=InlineKeyboardMarkup(buttons))
     except Exception as e:
         logger.error(f"Error showing options: {e}")
         if update.callback_query:
-            await update.callback_query.message.reply_text(text, reply_markup=InlineKeyboardMarkup(buttons), parse_mode="Markdown")
+            await update.callback_query.message.reply_text(text, reply_markup=InlineKeyboardMarkup(buttons))
         else:
-            await update.message.reply_text(text, reply_markup=InlineKeyboardMarkup(buttons), parse_mode="Markdown")
+            await update.message.reply_text(text, reply_markup=InlineKeyboardMarkup(buttons))
 
 async def cb_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
@@ -314,7 +324,7 @@ async def cb_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         try:
             await query.edit_message_text(text, reply_markup=InlineKeyboardMarkup(buttons), parse_mode="Markdown")
         except:
-            await query.message.reply_text(text, reply_markup=InlineKeyboardMarkup(buttons), parse_mode="Markdown")
+            await query.message.reply_text(text, reply_markup=InlineKeyboardMarkup(buttons))
 
     elif data.startswith("srv|"):
         _, dr, ei, eo = data.split("|")

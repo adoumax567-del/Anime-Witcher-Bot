@@ -202,7 +202,20 @@ class DataManager:
                 score += 100
             return score
 
-        results.sort(key=get_smart_score, reverse=True)
+        def final_score(item):
+            score = get_smart_score(item)
+            query_key = re.sub(r"[^a-z0-9]+", " ", query_lower).strip()
+            ref_name = str(item.get("doc_ref", "")).split("/", 1)[-1].lower().replace("_", " ")
+            ref_key = re.sub(r"[^a-z0-9]+", " ", ref_name).strip()
+            # Prefer the canonical anime document over similarly named live-action,
+            # recap, movie, or season entries when the query is an exact title.
+            if ref_key == query_key:
+                score += 2000
+            if "live action" in ref_key and "live action" not in query_key:
+                score -= 500
+            return score
+
+        results.sort(key=final_score, reverse=True)
         # Lower threshold to ensure items are not missed
         final_results = [r for r in results if get_smart_score(r) > 20]
         
@@ -235,18 +248,33 @@ class DataManager:
                 }
             f = res.json().get("fields", {})
             
-            def g(key, default="غير متوفر"):
-                val = f.get(key, {})
+            def unwrap(val):
+                if not isinstance(val, dict): return val
                 if "stringValue" in val: return val["stringValue"]
                 if "integerValue" in val: return str(val["integerValue"])
                 if "doubleValue" in val: return str(val["doubleValue"])
-                return default
+                if "booleanValue" in val: return str(val["booleanValue"])
+                if "mapValue" in val: return {k: unwrap(v) for k, v in val["mapValue"].get("fields", {}).items()}
+                if "arrayValue" in val: return [unwrap(v) for v in val["arrayValue"].get("values", [])]
+                return None
+
+            raw = {key: unwrap(value) for key, value in f.items()}
+            nested = raw.get("data") if isinstance(raw.get("data"), dict) else {}
+            details = raw.get("details") if isinstance(raw.get("details"), dict) else {}
+            profile = {**nested, **raw, **details}
+            def g(key, default="غير متوفر"):
+                value = profile.get(key, default)
+                return value if value not in (None, "") else default
+
+            poster_value = g("poster", None) or g("poster_uri", None) or g("cover_uri", None) or g("image", None)
+            if isinstance(poster_value, dict):
+                poster_value = poster_value.get("large") or poster_value.get("medium") or poster_value.get("url")
 
             return {
                 "name": g("name") if g("name") != "غير متوفر" else g("title", "Unknown"),
                 "story": g("story") if g("story") != "غير متوفر" else g("description", "لا توجد قصة متاحة حالياً لهذا العمل."),
                 "rating": g("rating", "8.0"),
-                "poster": g("poster", None) if g("poster", None) != "غير متوفر" else g("image", None),
+                "poster": poster_value,
                 "status": g("status", "مستمر"),
                 "num_episodes": g("num_episodes") if g("num_episodes") != "غير متوفر" else g("episodes_count", "غير محدد"),
                 "year": g("year") if g("year") != "غير متوفر" else g("release_date", "2024"),
