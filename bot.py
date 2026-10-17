@@ -21,7 +21,12 @@ application = Application.builder().token(TOKEN).build()
 # --- API ---
 @api_app.get("/")
 async def root():
-    return {"status": "online", "message": "Anime Witcher API is running"}
+    return {"status": "online", "message": "Anime Witcher API is running", "sources_endpoint": "/sources"}
+
+@api_app.get("/sources")
+async def sources():
+    """List every connected search/content source used by the bot."""
+    return {"status": "success", "sources": DATA.get_source_catalog()}
 
 @api_app.get("/get_links")
 async def get_links(query: str = Query(...)):
@@ -38,7 +43,9 @@ async def get_links(query: str = Query(...)):
             "status": "success", 
             "anime": target["name"], 
             "episode": ep_num or 1, 
-            "links": [{"name": s["name"], "url": s["app_url"]} for s in servers]
+            "sources": target.get("sources", []),
+            "content_source": DATA.FIRESTORE_SOURCE,
+            "links": [{"name": s["name"], "url": s["app_url"], "source": s.get("source", DATA.FIRESTORE_SOURCE), "is_pixeldrain": s.get("is_pd", False)} for s in servers]
         }
     except Exception as e:
         return {"status": "error", "message": str(e)}
@@ -227,6 +234,8 @@ async def show_anime_options(update: Update, anime):
         f"🔢 إجمالي الحلقات: {details['num_episodes']}\n"
         f"━━━━━━━━━━━━━━━━━━\n"
         f"📝 ملخص القصة:\n{str(details['story'])[:600]}...\n"
+        f"📚 مصدر البيانات: {details.get('source', DATA.FIRESTORE_SOURCE)}\n"
+        f"🔎 فهارس البحث: {'، '.join(anime.get('sources', [])) or 'Algolia'}\n"
         f"━━━━━━━━━━━━━━━━━━"
     )
     caption = text[:1000] if len(text) > 1000 else text

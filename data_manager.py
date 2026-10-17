@@ -9,6 +9,23 @@ logging.basicConfig(format="%(asctime)s - %(levelname)s - %(message)s", level=lo
 logger = logging.getLogger(__name__)
 
 class DataManager:
+    ANIME_INDEX_SOURCES = {
+        "all_anime": "Algolia · all_anime (كل الأعمال)",
+        "series": "Algolia · series (المسلسلات)",
+        "movies": "Algolia · movies (الأفلام)",
+        "anime_list": "Algolia · anime_list (قائمة الأنمي)",
+        "shows": "Algolia · shows (العروض)",
+        "animes": "Algolia · animes (الأعمال)",
+    }
+    CHARACTER_INDEX_SOURCES = {
+        "characters": "Algolia · characters (الشخصيات)",
+        "character": "Algolia · character (الشخصيات)",
+        "people": "Algolia · people (الشخصيات)",
+        "anime_characters": "Algolia · anime_characters (شخصيات الأنمي)",
+    }
+    FIRESTORE_SOURCE = "Anime Witcher · Firebase Firestore (التفاصيل والحلقات والخوادم)"
+    JIKAN_SOURCE = "Jikan API (مصدر احتياطي لملفات الشخصيات فقط)"
+
     def __init__(self):
         self.firebase_api_key = os.environ.get("FIREBASE_API_KEY", "AIzaSyAcbWRwfFNnCpoydDXlEALWnM_TYVcJOMU")
         self.firebase_project_id = os.environ.get("FIREBASE_PROJECT_ID", "animewitcher-1c66d")
@@ -35,7 +52,10 @@ class DataManager:
                 "params": f"query={query}&hitsPerPage=50&typoTolerance=true&ignorePlurals=true&removeStopWords=true"
             }, timeout=8)
             data = res.json()
-            return data.get("hits", [])
+            hits = data.get("hits", [])
+            for hit in hits:
+                hit["_source_index"] = index
+            return hits
         except Exception as e:
             logger.error(f"Algolia search error on index {index}: {e}")
             return []
@@ -45,7 +65,7 @@ class DataManager:
         query = query.strip()
         if not query:
             return []
-        indexes = ["characters", "character", "people", "anime_characters"]
+        indexes = list(self.CHARACTER_INDEX_SOURCES)
         hits = []
         with ThreadPoolExecutor(max_workers=len(indexes)) as executor:
             futures = [executor.submit(self.search_algolia, idx, query) for idx in indexes]
@@ -75,6 +95,7 @@ class DataManager:
                 "doc_ref": hit.get("doc_ref") or hit.get("path"),
                 "mal_id": hit.get("mal_id") or hit.get("id") or hit.get("objectID"),
                 "score": score,
+                "sources": [self.CHARACTER_INDEX_SOURCES.get(hit.get("_source_index"), "Algolia")],
             }
         return sorted(unique.values(), key=lambda item: item["score"], reverse=True)[:20]
 
@@ -150,7 +171,7 @@ class DataManager:
         norm_query = query.replace('أ', 'ا').replace('إ', 'ا').replace('آ', 'ا').replace('ة', 'ه').replace('ى', 'ي')
         
         # Comprehensive list of Algolia indices extracted from the APK / app structure
-        indices = ["all_anime", "series", "movies", "anime_list", "shows", "animes"]
+        indices = list(self.ANIME_INDEX_SOURCES)
         all_hits = []
         
         with ThreadPoolExecutor(max_workers=6) as executor:
@@ -169,18 +190,21 @@ class DataManager:
 
         unique = {}
         for h in all_hits:
-            oid = h.get("objectID") or h.get("id") or h.get("path")
+            name = h.get("name") or h.get("title") or h.get("arabic_name") or h.get("english_name") or "Unknown"
+            oid = h.get("objectID") or h.get("id") or h.get("path") or self.normalize_text(name)
+            doc_ref = h.get("doc_ref") or h.get("path")
+            if not doc_ref:
+                doc_ref = f"anime_list/{oid}"
+            source = self.ANIME_INDEX_SOURCES.get(h.get("_source_index"), "Algolia")
             if oid not in unique:
-                name = h.get("name") or h.get("title") or h.get("arabic_name") or h.get("english_name") or "Unknown"
-                doc_ref = h.get("doc_ref") or h.get("path")
-                if not doc_ref:
-                    # Construct doc_ref if path is missing
-                    doc_ref = f"anime_list/{oid}"
                 unique[oid] = {
                     "name": name,
                     "doc_ref": doc_ref,
-                    "poster": h.get("poster") or h.get("image") or h.get("cover")
+                    "poster": h.get("poster") or h.get("image") or h.get("cover"),
+                    "sources": [source],
                 }
+            elif source not in unique[oid]["sources"]:
+                unique[oid]["sources"].append(source)
         
         results = list(unique.values())
         if not results: return []
@@ -281,7 +305,8 @@ class DataManager:
                 "type": g("type", "أنمي"),
                 "genres": g("genres", "أكشن، مغامرات"),
                 "season": g("season", "غير محدد"),
-                "studio": g("studio", "غير معروف")
+                "studio": g("studio", "غير معروف"),
+                "source": self.FIRESTORE_SOURCE,
             }
         except Exception as e:
             logger.error(f"Error fetching details: {e}")
@@ -296,7 +321,8 @@ class DataManager:
                 "type": "أنمي",
                 "genres": "أكشن، مغامرات",
                 "season": "الكل",
-                "studio": "استوديو معتمد"
+                "studio": "استوديو معتمد",
+                "source": self.FIRESTORE_SOURCE,
             }
 
     def get_episodes(self, doc_ref):
@@ -317,7 +343,7 @@ class DataManager:
                     nums = re.findall(r'\d+', name)
                     order = int(nums[0]) if nums else 999
                 except: order = 999
-                eps.append({"id": eid, "name": name, "order": order})
+                eps.append({"id": eid, "name": name, "order": order, "source": self.FIRESTORE_SOURCE})
             eps.sort(key=lambda x: x["order"])
             return eps
         except Exception as e:
@@ -354,7 +380,8 @@ class DataManager:
                         "name": name, 
                         "url": self.resolve_pd(link, mode="view"), 
                         "app_url": self.resolve_pd(link, mode="download"),
-                        "is_pd": "pixeldrain" in link.lower()
+                        "is_pd": "pixeldrain" in link.lower(),
+                        "source": self.FIRESTORE_SOURCE
                     })
             if not servers:
                 servers = []
@@ -369,3 +396,18 @@ class DataManager:
         if not m: m = re.search(r"(.+)\s+(\d+)$", q)
         if m: return m.group(1).strip(), int(m.group(2))
         return q.strip(), None
+
+    def get_source_catalog(self):
+        """Return the complete, human-readable source map used by this service."""
+        return {
+            "anime_search": [
+                {"id": key, "name": value, "type": "Algolia index"}
+                for key, value in self.ANIME_INDEX_SOURCES.items()
+            ],
+            "character_search": [
+                {"id": key, "name": value, "type": "Algolia index"}
+                for key, value in self.CHARACTER_INDEX_SOURCES.items()
+            ],
+            "content": [{"id": "firestore", "name": self.FIRESTORE_SOURCE, "type": "Firestore REST"}],
+            "fallback": [{"id": "jikan", "name": self.JIKAN_SOURCE, "type": "External API"}],
+        }
