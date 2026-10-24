@@ -43,6 +43,88 @@ class DataManager:
                 self.id_token = res.json().get("idToken")
         except: pass
 
+    @staticmethod
+    def unwrap_firestore(value):
+        """Convert Firestore REST typed values into normal Python values."""
+        if not isinstance(value, dict):
+            return value
+        for key in ("stringValue", "integerValue", "doubleValue", "booleanValue", "timestampValue"):
+            if key in value:
+                return value[key]
+        if "mapValue" in value:
+            return {k: DataManager.unwrap_firestore(v) for k, v in value["mapValue"].get("fields", {}).items()}
+        if "arrayValue" in value:
+            return [DataManager.unwrap_firestore(v) for v in value["arrayValue"].get("values", [])]
+        if "nullValue" in value:
+            return None
+        return value
+
+    def read_firestore_document(self, path):
+        """Read a document and return unwrapped fields, or None on failure."""
+        url = f"{self.firestore_base_url}/{str(path).lstrip('/')}"
+        headers = {"Authorization": f"Bearer {self.id_token}"} if self.id_token else {}
+        try:
+            response = requests.get(url, headers=headers, params={"key": self.firebase_api_key}, timeout=10)
+            if response.status_code != 200:
+                logger.warning("Firestore document unavailable %s: HTTP %s", path, response.status_code)
+                return None
+            return {k: self.unwrap_firestore(v) for k, v in response.json().get("fields", {}).items()}
+        except Exception as exc:
+            logger.warning("Firestore document error %s: %s", path, exc)
+            return None
+
+    @staticmethod
+    def _link_metadata(key, parent_key="", record=None):
+        text = f"{key} {parent_key} {record or ''}".lower()
+        quality = next((q for q in re.findall(r"(?:2160|1440|1080|720|576|480|360)p", text)), "")
+        language = ""
+        for token, label in (("dual", "Dual Audio"), ("dub", "Dubbed"), ("sub", "Subtitled"),
+                             ("arabic", "Arabic"), ("عربي", "Arabic"), ("english", "English"), ("انجليزي", "English")):
+            if token in text:
+                language = label
+                break
+        return quality, language
+
+    def extract_link_records(self, value, path="", parent_key=""):
+        """Recursively collect watch links from nested server/quality structures."""
+        records = []
+        if isinstance(value, dict):
+            # Metadata beside a URL is retained when possible.
+            scalar_values = " ".join(str(v) for v in value.values() if isinstance(v, (str, int, float)))
+            context = f"{parent_key} {' '.join(str(k) for k in value.keys())} {scalar_values}".strip()
+            for key, child in value.items():
+                records.extend(self.extract_link_records(child, f"{path}.{key}".strip('.'), context or str(key)))
+            return records
+        if isinstance(value, list):
+            for index, child in enumerate(value):
+                records.extend(self.extract_link_records(child, f"{path}[{index}]", parent_key))
+            return records
+        if not isinstance(value, str):
+            return records
+        for raw_url in re.findall(r"https?://[^\s\"'<>]+", value):
+            url = raw_url.rstrip("),;]}>")
+            lower = url.lower()
+            if any(x in lower for x in (".jpg", ".jpeg", ".png", ".webp", "image")):
+                continue
+            quality, language = self._link_metadata(path, parent_key, value)
+            is_pd = "pixeldrain.com" in lower
+            view_url = self.resolve_pd(url, mode="view") if is_pd else url
+            download_url = self.resolve_pd(url, mode="download") if is_pd else (
+                url if any(x in lower for x in (".m3u8", ".mp4", ".mkv", ".webm")) else None
+            )
+            records.append({
+                "name": parent_key.replace('_', ' ').strip() or "مشغل",
+                "url": view_url,
+                "view_url": view_url,
+                "download_url": download_url,
+                "quality": quality or "غير محددة",
+                "language": language or "غير محددة",
+                "is_pd": is_pd,
+                "source_path": path,
+                "source": self.FIRESTORE_SOURCE,
+            })
+        return records
+
     def search_algolia(self, index, query):
         url = f"https://{self.algolia_app_id}-dsn.algolia.net/1/indexes/{index}/query"
         headers = {"X-Algolia-Application-Id": self.algolia_app_id, "X-Algolia-API-Key": self.algolia_api_key}
@@ -330,14 +412,26 @@ class DataManager:
         headers = {"Authorization": f"Bearer {self.id_token}"} if self.id_token else {}
         try:
             res = requests.get(url, headers=headers, params={"key": self.firebase_api_key}, timeout=10)
-            if res.status_code != 200:
+            docs = res.json().get("documents", []) if res.status_code == 200 else []
+            # Some app releases store episodes as an array/map in the anime
+            # document instead of a Firestore subcollection.
+            if not docs:
+                profile = self.read_firestore_document(doc_ref) or {}
+                embedded = profile.get("episodes") or profile.get("episodes_list") or profile.get("items") or []
+                if isinstance(embedded, dict):
+                    embedded = list(embedded.values())
+                docs = [{"fields": item if isinstance(item, dict) else {"name": item},
+                         "name": f"{doc_ref}/episodes/ep_{i + 1}"}
+                        for i, item in enumerate(embedded) if isinstance(item, (dict, str, int))]
+            if not docs:
                 logger.warning("Episodes unavailable for %s: HTTP %s", doc_ref, res.status_code)
                 return []
-            docs = res.json().get("documents", [])
             eps = []
             for d in docs:
-                f = d.get("fields", {})
-                name = f.get("name", {}).get("stringValue", f"الحلقة")
+                f = {k: self.unwrap_firestore(v) for k, v in d.get("fields", {}).items()}
+                name = f.get("name") or f.get("title") or f.get("episode") or f"الحلقة"
+                if isinstance(name, (int, float)):
+                    name = f"الحلقة {name}"
                 eid = d.get("name").split("/")[-1]
                 try: 
                     nums = re.findall(r'\d+', name)
@@ -363,33 +457,54 @@ class DataManager:
         headers = {"Authorization": f"Bearer {self.id_token}"} if self.id_token else {}
         try:
             res = requests.get(url, headers=headers, params={"key": self.firebase_api_key}, timeout=10)
-            if res.status_code != 200:
+            all_records = []
+            if res.status_code == 200:
+                for document in res.json().get("documents", []):
+                    fields = {k: self.unwrap_firestore(v) for k, v in document.get("fields", {}).items()}
+                    fields = self.expand_server_ids(fields)
+                    all_records.extend(self.extract_link_records(fields, document.get("name", "")))
+            # Fallback for releases where servers are embedded in the episode
+            # document rather than exposed as a subcollection.
+            if not all_records:
+                episode = self.read_firestore_document(f"{str(doc_ref).lstrip('/')}/episodes/{ep_id}") or {}
+                episode = self.expand_server_ids(episode)
+                all_records = self.extract_link_records(episode, f"{doc_ref}/episodes/{ep_id}")
+            if not all_records:
                 logger.warning("Servers unavailable for %s/%s: HTTP %s", doc_ref, ep_id, res.status_code)
                 return []
-            docs = res.json().get("documents", [])
             servers = []
-            for d in docs:
-                f = d.get("fields", {})
-                name = f.get("name", {}).get("stringValue", "Server")
-                link = f.get("link", {}).get("stringValue", "")
-                if not link:
-                    for k, b in [("streamtape_video_id", "https://streamtape.com/e/"), ("mixdrop_video_id", "https://mixdrop.co/e/")]:
-                        if k in f: link = b + f[k].get("stringValue", ""); break
-                if link:
-                    servers.append({
-                        "name": name, 
-                        "url": self.resolve_pd(link, mode="view"), 
-                        "app_url": self.resolve_pd(link, mode="download"),
-                        "is_pd": "pixeldrain" in link.lower(),
-                        "source": self.FIRESTORE_SOURCE
-                    })
-            if not servers:
-                servers = []
+            seen = set()
+            for record in all_records:
+                key = (record["view_url"], record.get("quality"), record.get("language"))
+                if key in seen:
+                    continue
+                seen.add(key)
+                record["app_url"] = record.get("download_url") or record["view_url"]
+                servers.append(record)
             servers.sort(key=lambda x: x["is_pd"], reverse=True)
             return servers
         except Exception as e:
             logger.error(f"Error fetching servers: {e}")
             return []
+
+    @staticmethod
+    def expand_server_ids(fields):
+        """Turn provider IDs used by older app records into provider URLs."""
+        if not isinstance(fields, dict):
+            return fields
+        expanded = dict(fields)
+        providers = {
+            "streamtape_video_id": "https://streamtape.com/e/",
+            "mixdrop_video_id": "https://mixdrop.co/e/",
+            "doodstream_video_id": "https://dood.li/e/",
+            "filemoon_video_id": "https://filemoon.sx/e/",
+            "streamwish_video_id": "https://streamwish.to/e/",
+        }
+        for key, base in providers.items():
+            value = fields.get(key)
+            if value and isinstance(value, str):
+                expanded[f"{key}_url"] = base + value
+        return expanded
 
     def parse_smart_query(self, q):
         m = re.search(r"(.+)\s+(?:الحلقة|حلقة|episode|ep|part|epsiode|الحلقه)\s+(\d+)", q, re.I)

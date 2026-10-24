@@ -45,7 +45,16 @@ async def get_links(query: str = Query(...)):
             "episode": ep_num or 1, 
             "sources": target.get("sources", []),
             "content_source": DATA.FIRESTORE_SOURCE,
-            "links": [{"name": s["name"], "url": s["app_url"], "source": s.get("source", DATA.FIRESTORE_SOURCE), "is_pixeldrain": s.get("is_pd", False)} for s in servers]
+            "links": [{
+                "name": s.get("name", "مشغل"),
+                "url": s.get("view_url", s.get("url")),
+                "view_url": s.get("view_url", s.get("url")),
+                "download_url": s.get("download_url"),
+                "quality": s.get("quality"),
+                "language": s.get("language"),
+                "source": s.get("source", DATA.FIRESTORE_SOURCE),
+                "is_pixeldrain": s.get("is_pd", False)
+            } for s in servers]
         }
     except Exception as e:
         return {"status": "error", "message": str(e)}
@@ -339,17 +348,24 @@ async def cb_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         _, dr, ei, eo = data.split("|")
         servers = DATA.get_servers(dr, ei)
         if servers:
-            btn = [[InlineKeyboardButton("🎬 تشغيل عبر المشغل السحابي", url=servers[0]["url"])]]
-            if len(servers) > 1:
-                other_btns = [[InlineKeyboardButton(f"🔗 {s['name']}", url=s['url'])] for s in servers[1:4]]
-                btn.extend(other_btns)
+            btn = []
+            for index, server in enumerate(servers[:12], 1):
+                label = f"▶️ {server.get('name', 'مشغل')}"
+                if server.get("quality") and server["quality"] != "غير محددة":
+                    label += f" · {server['quality']}"
+                if server.get("language") and server["language"] != "غير محددة":
+                    label += f" · {server['language']}"
+                btn.append([InlineKeyboardButton(label[:64], url=server["view_url"])])
+                if server.get("download_url"):
+                    btn.append([InlineKeyboardButton(f"⬇️ تحميل المشغل {index}", url=server["download_url"])])
             
             btn.append([InlineKeyboardButton("🏠 الرئيسية", callback_data="go_home")])
             
             success_text = (
                 f"✅ **تم تجهيز الحلقة رقم {eo} بنجاح!**\n"
                 "━━━━━━━━━━━━━━━━━━\n"
-                "يرجى النقر على الزر أدناه لبدء المشاهدة الفورية عبر متصفحك الآمن."
+                f"تم العثور على {len(servers)} رابطاً من المشغلات المتاحة.\n"
+                "اختر الجودة للمشاهدة، أو زر التحميل إذا كان المصدر يوفّر رابط تحميل مباشراً."
             )
             
             await query.message.reply_text(
