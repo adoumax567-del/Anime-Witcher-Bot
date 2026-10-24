@@ -10,18 +10,10 @@ logger = logging.getLogger(__name__)
 
 class DataManager:
     ANIME_INDEX_SOURCES = {
-        "all_anime": "Algolia · all_anime (كل الأعمال)",
         "series": "Algolia · series (المسلسلات)",
-        "movies": "Algolia · movies (الأفلام)",
-        "anime_list": "Algolia · anime_list (قائمة الأنمي)",
-        "shows": "Algolia · shows (العروض)",
-        "animes": "Algolia · animes (الأعمال)",
     }
     CHARACTER_INDEX_SOURCES = {
         "characters": "Algolia · characters (الشخصيات)",
-        "character": "Algolia · character (الشخصيات)",
-        "people": "Algolia · people (الشخصيات)",
-        "anime_characters": "Algolia · anime_characters (شخصيات الأنمي)",
     }
     FIRESTORE_SOURCE = "Anime Witcher · Firebase Firestore (التفاصيل والحلقات والخوادم)"
     JIKAN_SOURCE = "Jikan API (مصدر احتياطي لملفات الشخصيات فقط)"
@@ -29,12 +21,15 @@ class DataManager:
     def __init__(self):
         self.firebase_api_key = os.environ.get("FIREBASE_API_KEY", "AIzaSyAcbWRwfFNnCpoydDXlEALWnM_TYVcJOMU")
         self.firebase_project_id = os.environ.get("FIREBASE_PROJECT_ID", "animewitcher-1c66d")
-        self.algolia_app_id = os.environ.get("ALGOLIA_APP_ID", "D8LH9I7ZL7")
-        self.algolia_api_key = os.environ.get("ALGOLIA_API_KEY", "b56c01ef52540ef334bcdbaa00ded9e4")
+        self.algolia_app_id = os.environ.get("ALGOLIA_APP_ID", "")
+        self.algolia_api_key = os.environ.get("ALGOLIA_API_KEY", "")
+        self.algolia_app_id2 = os.environ.get("ALGOLIA_APP_ID2", "")
+        self.algolia_api_key2 = os.environ.get("ALGOLIA_API_KEY2", "")
         self.firestore_base_url = f"https://firestore.googleapis.com/v1/projects/{self.firebase_project_id}/databases/(default)/documents"
         self.auth_url = f"https://identitytoolkit.googleapis.com/v1/accounts:signUp?key={self.firebase_api_key}"
         self.id_token = None
         self.refresh_token()
+        self.load_algolia_settings()
 
     def refresh_token(self):
         try:
@@ -42,6 +37,22 @@ class DataManager:
             if res.status_code == 200:
                 self.id_token = res.json().get("idToken")
         except: pass
+
+    def load_algolia_settings(self):
+        """Load the same rotating search credentials used by the Android app."""
+        try:
+            constants = self.read_firestore_document("Settings/constants") or {}
+            primary = constants.get("search_settings") if isinstance(constants.get("search_settings"), dict) else {}
+            secondary = constants.get("search_settings2") if isinstance(constants.get("search_settings2"), dict) else {}
+            service = self.read_firestore_document("Settings/search_service") or {}
+            self.algolia_app_id = self.algolia_app_id or primary.get("app_id_v4") or service.get("app_id") or ""
+            self.algolia_api_key = self.algolia_api_key or primary.get("api_key") or service.get("api_key") or ""
+            self.algolia_app_id2 = self.algolia_app_id2 or secondary.get("app_id") or ""
+            self.algolia_api_key2 = self.algolia_api_key2 or secondary.get("api_key") or ""
+            logger.info("Loaded Anime Witcher search settings: primary=%s secondary=%s",
+                        self.algolia_app_id or "unavailable", self.algolia_app_id2 or "unavailable")
+        except Exception as exc:
+            logger.warning("Could not load dynamic Algolia settings: %s", exc)
 
     @staticmethod
     def unwrap_firestore(value):
@@ -419,31 +430,47 @@ class DataManager:
             }
 
     def get_episodes(self, doc_ref):
-        url = f"{self.firestore_base_url}/{str(doc_ref).lstrip('/')}/episodes"
         headers = {"Authorization": f"Bearer {self.id_token}"} if self.id_token else {}
         try:
-            res = requests.get(url, headers=headers, params={"key": self.firebase_api_key}, timeout=10)
-            docs = res.json().get("documents", []) if res.status_code == 200 else []
+            base = str(doc_ref).lstrip('/')
+            summary_url = f"{self.firestore_base_url}/{base}/episodes_summery/summery"
+            summary_res = requests.get(summary_url, headers=headers, params={"key": self.firebase_api_key}, timeout=10)
+            episodes_status = summary_res.status_code
+            summary_fields = summary_res.json().get("fields", {}) if summary_res.status_code == 200 else {}
+            summary = {k: self.unwrap_firestore(v) for k, v in summary_fields.items()}
+            summary_items = summary.get("episodes", []) if isinstance(summary, dict) else []
+            docs = [{"fields": item, "name": f"{base}/episodes/{item.get('doc_id')}"}
+                    for item in summary_items if isinstance(item, dict) and item.get("doc_id")]
+            # The app falls back to the real episodes subcollection when the summary is absent.
+            if not docs:
+                url = f"{self.firestore_base_url}/{base}/episodes"
+                res = requests.get(url, headers=headers, params={"key": self.firebase_api_key}, timeout=10)
+                episodes_status = res.status_code
+                docs = res.json().get("documents", []) if res.status_code == 200 else []
             # Some app releases store episodes as an array/map in the anime
             # document instead of a Firestore subcollection.
             if not docs:
-                profile = self.read_firestore_document(doc_ref) or {}
+                profile = self.read_firestore_document(base) or {}
                 embedded = profile.get("episodes") or profile.get("episodes_list") or profile.get("items") or []
                 if isinstance(embedded, dict):
                     embedded = list(embedded.values())
                 docs = [{"fields": item if isinstance(item, dict) else {"name": item},
-                         "name": f"{doc_ref}/episodes/ep_{i + 1}"}
+                         "name": f"{base}/episodes/ep_{i + 1}"}
                         for i, item in enumerate(embedded) if isinstance(item, (dict, str, int))]
             if not docs:
-                logger.warning("Episodes unavailable for %s: HTTP %s", doc_ref, res.status_code)
+                logger.warning("Episodes unavailable for %s: HTTP %s", doc_ref, episodes_status)
                 return []
             eps = []
+            seen_episode_ids = set()
             for d in docs:
                 f = {k: self.unwrap_firestore(v) for k, v in d.get("fields", {}).items()}
                 name = f.get("name") or f.get("title") or f.get("episode") or f"الحلقة"
                 if isinstance(name, (int, float)):
                     name = f"الحلقة {name}"
-                eid = d.get("name").split("/")[-1]
+                eid = str(d.get("name") or "").split("/")[-1]
+                if eid in seen_episode_ids:
+                    continue
+                seen_episode_ids.add(eid)
                 try: 
                     nums = re.findall(r'\d+', name)
                     order = int(nums[0]) if nums else 999
@@ -464,22 +491,34 @@ class DataManager:
         return url
 
     def get_servers(self, doc_ref, ep_id):
-        url = f"{self.firestore_base_url}/{str(doc_ref).lstrip('/')}/episodes/{ep_id}/servers"
         headers = {"Authorization": f"Bearer {self.id_token}"} if self.id_token else {}
         try:
-            res = requests.get(url, headers=headers, params={"key": self.firebase_api_key}, timeout=10)
+            base = str(doc_ref).lstrip('/')
             all_records = []
+            # v1.4.9 first tries the compact all_servers document.
+            compact_path = f"{base}/episodes/{ep_id}/servers2/all_servers"
+            compact = self.read_firestore_document(compact_path) or {}
+            compact_items = compact.get("servers", []) if isinstance(compact, dict) else []
+            for item in compact_items:
+                if isinstance(item, dict):
+                    fields = self.expand_server_ids(item)
+                    all_records.extend(self._server_record_from_fields(fields, compact_path))
+            # Then read the normal servers subcollection, exactly as the app does.
+            url = f"{self.firestore_base_url}/{base}/episodes/{ep_id}/servers"
+            res = requests.get(url, headers=headers, params={"key": self.firebase_api_key}, timeout=10)
             if res.status_code == 200:
                 for document in res.json().get("documents", []):
                     fields = {k: self.unwrap_firestore(v) for k, v in document.get("fields", {}).items()}
+                    if fields.get("visible") is False:
+                        continue
                     fields = self.expand_server_ids(fields)
-                    all_records.extend(self.extract_link_records(fields, document.get("name", "")))
+                    all_records.extend(self._server_record_from_fields(fields, document.get("name", "")))
             # Fallback for releases where servers are embedded in the episode
             # document rather than exposed as a subcollection.
             if not all_records:
-                episode = self.read_firestore_document(f"{str(doc_ref).lstrip('/')}/episodes/{ep_id}") or {}
+                episode = self.read_firestore_document(f"{base}/episodes/{ep_id}") or {}
                 episode = self.expand_server_ids(episode)
-                all_records = self.extract_link_records(episode, f"{doc_ref}/episodes/{ep_id}")
+                all_records = self.extract_link_records(episode, f"{base}/episodes/{ep_id}")
             if not all_records:
                 logger.warning("Servers unavailable for %s/%s: HTTP %s", doc_ref, ep_id, res.status_code)
                 return []
@@ -497,6 +536,19 @@ class DataManager:
         except Exception as e:
             logger.error(f"Error fetching servers: {e}")
             return []
+
+    def _server_record_from_fields(self, fields, source_path):
+        """Normalize the app's server item (name/quality/link) without losing metadata."""
+        link = fields.get("link") or fields.get("url") or fields.get("video_uri")
+        if isinstance(link, str) and link.strip():
+            record = self.extract_link_records({"link": link}, source_path, str(fields.get("name") or "مشغل"))
+            for item in record:
+                item["name"] = str(fields.get("name") or item["name"])
+                item["quality"] = fields.get("quality") or item.get("quality")
+                item["open_browser"] = bool(fields.get("open_browser"))
+                item["direct_link"] = bool(fields.get("direct_link"))
+            return record
+        return self.extract_link_records(fields, source_path, str(fields.get("name") or "مشغل"))
 
     @staticmethod
     def expand_server_ids(fields):
@@ -535,5 +587,12 @@ class DataManager:
                 for key, value in self.CHARACTER_INDEX_SOURCES.items()
             ],
             "content": [{"id": "firestore", "name": self.FIRESTORE_SOURCE, "type": "Firestore REST"}],
+            "server_sources": [
+                {"id": "PD", "name": "PD / PixelDrain (روابط مباشرة للمشاهدة والتحميل)", "type": "Anime Witcher server"},
+                {"id": "KF", "name": "KF / KrakenFiles", "type": "Anime Witcher server"},
+                {"id": "MF", "name": "MF / MediaFire", "type": "Anime Witcher server"},
+                {"id": "ST", "name": "ST / StreamTape", "type": "Anime Witcher server"},
+                {"id": "BU", "name": "BU / Backup server", "type": "Anime Witcher server"},
+            ],
             "fallback": [{"id": "jikan", "name": self.JIKAN_SOURCE, "type": "External API"}],
         }
