@@ -97,7 +97,7 @@ class DataManager:
         return quality, language
 
     def extract_link_records(self, value, path="", parent_key=""):
-        """Recursively collect watch links from nested server/quality structures."""
+        """Collect only direct media URLs; player pages are intentionally discarded."""
         records = []
         if isinstance(value, dict):
             # Metadata beside a URL is retained when possible.
@@ -119,13 +119,18 @@ class DataManager:
                 continue
             quality, language = self._link_metadata(path, parent_key, value)
             is_pd = "pixeldrain.com" in lower
-            view_url = self.resolve_pd(url, mode="view") if is_pd else url
-            download_url = self.resolve_pd(url, mode="download") if is_pd else (
-                url if any(x in lower for x in (".m3u8", ".mp4", ".mkv", ".webm")) else None
-            )
-            link_type = "direct_download" if download_url else (
-                "direct_stream" if any(x in lower for x in (".m3u8", ".mp4", ".mkv", ".webm")) else "player_page"
-            )
+            # PixelDrain's /u/ page is not returned. The API file endpoint is
+            # both directly playable and suitable for a separate download URL.
+            if is_pd:
+                view_url = self.resolve_pd(url, mode="stream")
+                download_url = self.resolve_pd(url, mode="download")
+                link_type = "direct_download"
+            elif self.is_direct_media_url(url):
+                view_url = url
+                download_url = url if self.is_downloadable_media_url(url) else None
+                link_type = "direct_download" if download_url else "direct_stream"
+            else:
+                continue
             records.append({
                 "name": parent_key.replace('_', ' ').strip() or "مشغل",
                 "url": view_url,
@@ -140,6 +145,17 @@ class DataManager:
                 "source": self.FIRESTORE_SOURCE,
             })
         return records
+
+    @staticmethod
+    def is_direct_media_url(url):
+        """Return true only for a media/CDN URL, never for a player webpage."""
+        lower = str(url or "").lower().split("?", 1)[0]
+        return any(token in lower for token in (".m3u8", ".mp4", ".mkv", ".webm", ".ts", "/api/file/"))
+
+    @staticmethod
+    def is_downloadable_media_url(url):
+        lower = str(url or "").lower().split("?", 1)[0]
+        return any(token in lower for token in (".mp4", ".mkv", ".webm", "/api/file/"))
 
     def search_algolia(self, index, query):
         headers = {"X-Algolia-Application-Id": self.algolia_app_id, "X-Algolia-API-Key": self.algolia_api_key}
@@ -487,7 +503,9 @@ class DataManager:
             match = re.search(r"(?:/u/|/api/file/|/l/)([a-zA-Z0-9]+)", url)
             if match:
                 file_id = match.group(1)
-                return f"https://pixeldrain.com/u/{file_id}" if mode == "view" else f"https://pixeldrain.com/api/file/{file_id}?download"
+                if mode == "view":
+                    return f"https://pixeldrain.com/api/file/{file_id}"
+                return f"https://pixeldrain.com/api/file/{file_id}?download"
         return url
 
     def get_servers(self, doc_ref, ep_id):
@@ -531,7 +549,7 @@ class DataManager:
                 seen.add(key)
                 record["app_url"] = record.get("download_url") or record["view_url"]
                 servers.append(record)
-            servers.sort(key=lambda x: x["is_pd"], reverse=True)
+                servers.sort(key=lambda x: (x["is_pd"], x.get("link_type") == "direct_download"), reverse=True)
             return servers
         except Exception as e:
             logger.error(f"Error fetching servers: {e}")
@@ -595,4 +613,7 @@ class DataManager:
                 {"id": "BU", "name": "BU / Backup server", "type": "Anime Witcher server"},
             ],
             "fallback": [{"id": "jikan", "name": self.JIKAN_SOURCE, "type": "External API"}],
+            "discovered_external_apps": [
+                {"id": "anime_slayer", "name": "Anime Slayer v1.5.10 · anslayer.com/anime/public/", "type": "Discovered API; not enabled without authorized integration credentials"},
+            ],
         }

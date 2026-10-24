@@ -38,19 +38,22 @@ async def get_links(query: str = Query(...)):
         episodes = DATA.get_episodes(target["doc_ref"])
         target_ep = next((e for e in episodes if e["order"] == ep_num), episodes[0] if episodes else None)
         if not target_ep: return {"status": "error", "message": "Episode not found"}
-        servers = DATA.get_servers(target["doc_ref"], target_ep["id"])
+        servers = [s for s in DATA.get_servers(target["doc_ref"], target_ep["id"])
+                   if s.get("link_type") == "direct_download" and s.get("download_url")]
         return {
             "status": "success", 
             "anime": target["name"], 
             "episode": ep_num or 1, 
             "sources": target.get("sources", []),
             "content_source": DATA.FIRESTORE_SOURCE,
+            "direct_only": True,
+            "downloadable_only": True,
             "links": [{
                 "name": s.get("name", "مشغل"),
-                "url": s.get("view_url", s.get("url")),
-                "view_url": s.get("view_url", s.get("url")),
+                "url": s.get("download_url"),
+                "view_url": s.get("view_url"),
                 "download_url": s.get("download_url"),
-                "link_type": s.get("link_type", "player_page"),
+                "link_type": "direct_download",
                 "verified": s.get("verified", False),
                 "quality": s.get("quality"),
                 "language": s.get("language"),
@@ -96,8 +99,8 @@ async def show_help(update: Update):
         "━━━━━━━━━━━━━━━━━━\n"
         "🎯 **كيفية البحث:**\n"
         "استخدم أزرار البحث واكتب اسم العمل. نظامنا يدعم التصحيح التلقائي للأخطاء الإملائية.\n\n"
-        "📺 **المشاهدة المباشرة:**\n"
-        "عند اختيار الحلقة، سيتم توفير رابط مشغل سحابي آمن يفتح في متصفحك فوراً دون الحاجة للتحميل.\n\n"
+        "📺 **المشاهدة والتنزيل المباشر:**\n"
+        "سيظهر فقط الرابط الذي يشير إلى ملف فيديو أو بث مباشر فعلي. لن تظهر روابط iframe أو صفحات المشغلات.\n\n"
         "📁 **الأرشيف الضخم:**\n"
         "في حال الأعمال الطويلة، يمكنك التنقل بين مجموعات الحلقات بسلاسة تامة.\n\n"
         "🆘 **هل تحتاج لمساعدة إضافية؟**\n"
@@ -351,23 +354,23 @@ async def cb_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         servers = DATA.get_servers(dr, ei)
         if servers:
             btn = []
-            for index, server in enumerate(servers[:12], 1):
+            direct_servers = [s for s in servers if s.get("link_type") == "direct_download" and s.get("download_url")]
+            for index, server in enumerate(direct_servers[:12], 1):
                 label = f"▶️ {server.get('name', 'مشغل')}"
                 if server.get("quality") and server["quality"] != "غير محددة":
                     label += f" · {server['quality']}"
                 if server.get("language") and server["language"] != "غير محددة":
                     label += f" · {server['language']}"
-                btn.append([InlineKeyboardButton(label[:64], url=server["view_url"])])
-                if server.get("download_url"):
-                    btn.append([InlineKeyboardButton(f"⬇️ تحميل المشغل {index}", url=server["download_url"])])
+                btn.append([InlineKeyboardButton(f"▶️ مشاهدة · {label[3:][:48]}", url=server["view_url"])])
+                btn.append([InlineKeyboardButton(f"⬇️ تنزيل مباشر · {index}", url=server["download_url"])])
             
             btn.append([InlineKeyboardButton("🏠 الرئيسية", callback_data="go_home")])
             
             success_text = (
                 f"✅ **تم تجهيز الحلقة رقم {eo} بنجاح!**\n"
                 "━━━━━━━━━━━━━━━━━━\n"
-                f"تم العثور على {len(servers)} رابطاً من المشغلات المتاحة.\n"
-                "اختر الجودة للمشاهدة، أو زر التحميل إذا كان المصدر يوفّر رابط تحميل مباشراً."
+                f"تم العثور على {len(direct_servers)} رابط مباشر قابل للتنزيل.\n"
+                "تم استبعاد جميع صفحات المشغلات والروابط غير المباشرة تلقائياً."
             )
             
             await query.message.reply_text(
