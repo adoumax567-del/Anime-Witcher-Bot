@@ -50,6 +50,8 @@ async def get_links(query: str = Query(...)):
                 "url": s.get("view_url", s.get("url")),
                 "view_url": s.get("view_url", s.get("url")),
                 "download_url": s.get("download_url"),
+                "link_type": s.get("link_type", "player_page"),
+                "verified": s.get("verified", False),
                 "quality": s.get("quality"),
                 "language": s.get("language"),
                 "source": s.get("source", DATA.FIRESTORE_SOURCE),

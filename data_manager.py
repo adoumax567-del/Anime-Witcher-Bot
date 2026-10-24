@@ -112,11 +112,16 @@ class DataManager:
             download_url = self.resolve_pd(url, mode="download") if is_pd else (
                 url if any(x in lower for x in (".m3u8", ".mp4", ".mkv", ".webm")) else None
             )
+            link_type = "direct_download" if download_url else (
+                "direct_stream" if any(x in lower for x in (".m3u8", ".mp4", ".mkv", ".webm")) else "player_page"
+            )
             records.append({
                 "name": parent_key.replace('_', ' ').strip() or "مشغل",
                 "url": view_url,
                 "view_url": view_url,
                 "download_url": download_url,
+                "link_type": link_type,
+                "verified": False,
                 "quality": quality or "غير محددة",
                 "language": language or "غير محددة",
                 "is_pd": is_pd,
@@ -126,21 +131,27 @@ class DataManager:
         return records
 
     def search_algolia(self, index, query):
-        url = f"https://{self.algolia_app_id}-dsn.algolia.net/1/indexes/{index}/query"
         headers = {"X-Algolia-Application-Id": self.algolia_app_id, "X-Algolia-API-Key": self.algolia_api_key}
-        try:
-            # Broaden search with multiple query strategies and empty query fallback if needed
-            res = requests.post(url, headers=headers, json={
-                "params": f"query={query}&hitsPerPage=50&typoTolerance=true&ignorePlurals=true&removeStopWords=true"
-            }, timeout=8)
-            data = res.json()
-            hits = data.get("hits", [])
-            for hit in hits:
-                hit["_source_index"] = index
-            return hits
-        except Exception as e:
-            logger.error(f"Algolia search error on index {index}: {e}")
-            return []
+        hosts = [
+            f"https://{self.algolia_app_id}-dsn.algolia.net",
+            f"https://{self.algolia_app_id}-1.algolianet.com",
+            f"https://{self.algolia_app_id}-2.algolianet.com",
+            f"https://{self.algolia_app_id}-3.algolianet.com",
+        ]
+        payload = {"params": f"query={query}&hitsPerPage=50&typoTolerance=true&ignorePlurals=true&removeStopWords=true"}
+        for host in hosts:
+            try:
+                res = requests.post(f"{host}/1/indexes/{index}/query", headers=headers, json=payload, timeout=8)
+                if res.status_code != 200:
+                    logger.warning("Algolia source %s via %s: HTTP %s", index, host, res.status_code)
+                    continue
+                hits = res.json().get("hits", [])
+                for hit in hits:
+                    hit["_source_index"] = index
+                return hits
+            except Exception as exc:
+                logger.warning("Algolia host unavailable %s via %s: %s", index, host, type(exc).__name__)
+        return []
 
     def search_characters(self, query):
         """Search character records across likely Anime Witcher Algolia indexes."""
